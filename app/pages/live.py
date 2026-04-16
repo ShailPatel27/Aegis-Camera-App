@@ -281,6 +281,14 @@ class LivePage(QWidget):
                 now=current_time,
             )
 
+        if self.loiter.isChecked() and activity.get("loiter_count", 0) > 0:
+            self._log_activity(
+                event_key="loiter:detected",
+                message=f"Loitering detected ({activity['loiter_count']})",
+                cooldown_key="loiter",
+                now=current_time,
+            )
+
         for face in faces:
             if face.get("matched") and face.get("name"):
                 self.log_identity_detected(face["name"], face.get("score"))
@@ -294,6 +302,8 @@ class LivePage(QWidget):
             "vehicle": self.vehicle.isChecked,
             "threat": self.threat.isChecked,
             "motion": self.motion.isChecked,
+            "loiter": self.loiter.isChecked,
+            "emergency": self.emergency.isChecked,
             "face_recognition": self.face_recognition.isChecked,
         }
 

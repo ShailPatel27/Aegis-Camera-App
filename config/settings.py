@@ -31,6 +31,11 @@ MOTION_DILATE_ITERATIONS = 2
 # Crowd Detection
 CROWD_THRESHOLD = 3  # alert if >= this
 
+# Loitering detection
+LOITER_DWELL_SECONDS = 8
+LOITER_MATCH_IOU = 0.35
+LOITER_TRACK_STALE_SECONDS = 2.5
+
 # Logging
 LOG_COOLDOWN = 2  # seconds
 INTRUSION_EVENT_COOLDOWN_SECONDS = 20
@@ -47,6 +52,7 @@ ACTIVITY_LOG_COOLDOWNS = {
     "vehicle": 60,
     "threat": 60,
     "motion": 30,
+    "loiter": 30,
     "identity": 60,
     "register:sample": 2,
     "register:save": 2,

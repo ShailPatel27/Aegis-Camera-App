@@ -13,6 +13,9 @@ from config.settings import (
     FACE_RECOGNITION_MATCH_IOU,
     FACE_RECOGNITION_UNKNOWN_LABEL,
     FRAME_INTERVAL_MS,
+    LOITER_DWELL_SECONDS,
+    LOITER_MATCH_IOU,
+    LOITER_TRACK_STALE_SECONDS,
     THREAT_CLASS_NAMES,
     THREAT_MIN_CONFIDENCE,
     YOLO_INFERENCE_FRAME_SKIP,
@@ -41,6 +44,8 @@ class AIWorker(QThread):
         self._confirmed_streaks = {}
         self._previous_raw_faces = []
         self._confirmed_face_streaks = {}
+        self._loiter_tracks = {}
+        self._next_loiter_track_id = 1
 
     @staticmethod
     def _iou(box_a, box_b):
@@ -160,6 +165,7 @@ class AIWorker(QThread):
                     self.toggles["crowd"](),
                     self.toggles["vehicle"](),
                     self.toggles["threat"](),
+                    self.toggles["loiter"](),
                 ]
             )
 
@@ -180,6 +186,7 @@ class AIWorker(QThread):
             elif not run_yolo:
                 self._previous_raw_detections = []
                 self._confirmed_streaks = {}
+                self._loiter_tracks = {}
 
             run_face = FACE_RECOGNITION_ENABLED and (
                 self.toggles.get("face_recognition") is None
@@ -256,6 +263,33 @@ class AIWorker(QThread):
                     cv2.LINE_AA,
                 )
 
+            loiter_count = 0
+            if self.toggles["loiter"]():
+                now = time.time()
+                person_boxes = [
+                    tuple(map(int, det["box"]))
+                    for det in detections
+                    if det["class_name"] == "person"
+                ]
+                loitering_boxes = self._update_loiter_tracks(person_boxes, now)
+                loiter_count = len(loitering_boxes)
+
+                for box in loitering_boxes:
+                    x1, y1, x2, y2 = box
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), (180, 105, 255), 2)
+                    cv2.putText(
+                        frame,
+                        "LOITERING",
+                        (x1, max(y1 - 10, 20)),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.55,
+                        (180, 105, 255),
+                        2,
+                        cv2.LINE_AA,
+                    )
+            else:
+                self._loiter_tracks = {}
+
             for face in faces:
                 x1, y1, x2, y2 = face["box"]
                 matched = face["matched"]
@@ -289,6 +323,7 @@ class AIWorker(QThread):
                 "vehicle_count": vehicle_count,
                 "threat_count": threat_count,
                 "motion_count": motion_count,
+                "loiter_count": loiter_count,
                 "matched_faces": matched_faces,
             }
             self.frame_ready.emit(frame, person_count, faces, activity)
@@ -307,3 +342,45 @@ class AIWorker(QThread):
         self.running = False
         self.quit()
         self.wait()
+
+    def _update_loiter_tracks(self, person_boxes, now):
+        matched_track_ids = set()
+        loitering_boxes = []
+
+        for box in person_boxes:
+            best_track_id = None
+            best_iou = 0.0
+            for track_id, track in self._loiter_tracks.items():
+                iou = self._iou(box, track["box"])
+                if iou > best_iou:
+                    best_iou = iou
+                    best_track_id = track_id
+
+            if best_track_id is not None and best_iou >= LOITER_MATCH_IOU:
+                track = self._loiter_tracks[best_track_id]
+                track["box"] = box
+                track["last_seen"] = now
+                matched_track_ids.add(best_track_id)
+            else:
+                track_id = self._next_loiter_track_id
+                self._next_loiter_track_id += 1
+                self._loiter_tracks[track_id] = {
+                    "box": box,
+                    "first_seen": now,
+                    "last_seen": now,
+                }
+                matched_track_ids.add(track_id)
+
+        stale_ids = []
+        for track_id, track in self._loiter_tracks.items():
+            if now - track["last_seen"] > LOITER_TRACK_STALE_SECONDS:
+                stale_ids.append(track_id)
+                continue
+            dwell = now - track["first_seen"]
+            if track_id in matched_track_ids and dwell >= LOITER_DWELL_SECONDS:
+                loitering_boxes.append(track["box"])
+
+        for track_id in stale_ids:
+            self._loiter_tracks.pop(track_id, None)
+
+        return loitering_boxes

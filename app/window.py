@@ -39,10 +39,19 @@ class MainWindow(QMainWindow):
 
         # 🔹 Pages
         self.stack = QStackedWidget()
-        self.stack.addWidget(LivePage())
-        self.stack.addWidget(LogsPage())
-        self.stack.addWidget(RegisterPage())
-        self.stack.addWidget(SettingsPage())
+        
+        # Create pages FIRST
+        self.logs_page = LogsPage()
+        self.live_page = LivePage(self.logs_page)
+
+        self.register_page = RegisterPage()
+        self.settings_page = SettingsPage()
+
+        # Add to stack
+        self.stack.addWidget(self.live_page)
+        self.stack.addWidget(self.logs_page)
+        self.stack.addWidget(self.register_page)
+        self.stack.addWidget(self.settings_page)
 
         # 🔹 Connect
         self.sidebar.currentRowChanged.connect(self.stack.setCurrentIndex)

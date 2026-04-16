@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Aegis Live</title>
+
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+        }
+
+        #controls {
+            margin-bottom: 10px;
+        }
+
+        #liveBtn {
+            background: red;
+            color: white;
+            border: none;
+            padding: 6px 10px;
+            cursor: pointer;
+            font-weight: bold;
+        }
+
+        #timeOverlay {
+            margin-left: 10px;
+            font-weight: bold;
+        }
+
+        #playerWrapper {
+            position: relative;
+            display: inline-block;
+        }
+
+        /* subtle overlay (like YouTube live badge area) */
+        #overlayTime {
+            position: absolute;
+            bottom: 10px;
+            right: 15px;
+            background: rgba(0, 0, 0, 0.6);
+            color: white;
+            padding: 4px 8px;
+            font-size: 14px;
+            border-radius: 4px;
+        }
+    </style>
+</head>
+
+<body>
+
+    <h2>Aegis Live</h2>
+
+    <div id="controls">
+        <button id="liveBtn">🔴 LIVE</button>
+        <span id="timeOverlay">LIVE</span>
+    </div>
+
+    <div id="playerWrapper">
+        <video id="video" controls autoplay muted width="800"></video>
+        <div id="overlayTime">LIVE</div>
+    </div>
+
+    <script type="module">
+
+        import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js/+esm'
+
+        // ✅ YOUR VALUES
+        const SUPABASE_URL = "https://lirtecxtbzyfbtqhsfee.supabase.co"
+        const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxpcnRlY3h0Ynp5ZmJ0cWhzZmVlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQ1ODkzMTEsImV4cCI6MjA5MDE2NTMxMX0.23cVdGu0jHNoN8xgyUCG55XQNFlhhW9_CBHLXVL-VoE"
+        const BUCKET = "video-chunks"
+
+        const USER_ID = "demo-user"
+        const CAM_ID = "main-cam"
+        const FOLDER = `${USER_ID}/${CAM_ID}`
+
+        const supabase = createClient(SUPABASE_URL, SUPABASE_KEY)
+
+        const video = document.getElementById("video")
+        const liveBtn = document.getElementById("liveBtn")
+        const timeOverlay = document.getElementById("timeOverlay")
+        const overlayTime = document.getElementById("overlayTime")
+
+        let mediaSource = new MediaSource()
+        video.src = URL.createObjectURL(mediaSource)
+
+        let sourceBuffer
+        let queue = []
+        let seen = new Set()
+        let isAppending = false
+        let isLive = true
+
+        // 🎯 FORMAT TIME
+        function formatTime(seconds) {
+            seconds = Math.max(0, seconds)
+            const m = Math.floor(seconds / 60)
+            const s = Math.floor(seconds % 60)
+            return `${m}:${s.toString().padStart(2, '0')}`
+        }
+
+        // 🔴 SAFE LIVE SEEK
+        function goLive() {
+            if (video.buffered.length > 0) {
+                const liveEdge = video.buffered.end(video.buffered.length - 1)
+                video.currentTime = liveEdge - 0.3
+            }
+        }
+
+        // LIVE BUTTON
+        liveBtn.onclick = () => {
+            isLive = true
+            goLive()
+        }
+
+        // 🎬 INIT
+        mediaSource.addEventListener("sourceopen", () => {
+
+            sourceBuffer = mediaSource.addSourceBuffer('video/mp4; codecs="avc1.42E01E"')
+            sourceBuffer.mode = "sequence"
+
+            sourceBuffer.addEventListener("updateend", () => {
+                isAppending = false
+                appendNext()
+            })
+
+            fetchLoop()
+        })
+
+        // 🔁 FETCH LOOP
+        async function fetchLoop() {
+            while (true) {
+                await fetchVideos()
+                await new Promise(r => setTimeout(r, 2000))
+            }
+        }
+
+        // 📥 FETCH
+        async function fetchVideos() {
+            const { data, error } = await supabase
+                .storage
+                .from(BUCKET)
+                .list(FOLDER, {
+                    sortBy: { column: 'name', order: 'asc' }
+                })
+
+            if (error) {
+                console.error(error)
+                return
+            }
+
+            const baseUrl = `${SUPABASE_URL}/storage/v1/object/public/${BUCKET}/${FOLDER}/`
+
+            // start near live
+            data.sort((a, b) => a.name.localeCompare(b.name))
+            const latest = data.slice(-1)
+
+            latest.forEach(file => {
+                if (!seen.has(file.name)) {
+                    seen.add(file.name)
+                    queue.push(baseUrl + file.name)
+                }
+            })
+
+            appendNext()
+        }
+
+        // 📦 APPEND
+        async function appendNext() {
+            if (!sourceBuffer || sourceBuffer.updating || isAppending || queue.length === 0) return
+
+            isAppending = true
+
+            const url = queue.shift()
+
+            try {
+                const res = await fetch(url)
+                const data = await res.arrayBuffer()
+
+                sourceBuffer.appendBuffer(data)
+
+                if (isLive && video.buffered.length > 0) {
+                    goLive()
+                }
+
+            } catch (e) {
+                console.error("Append failed:", e)
+                isAppending = false
+            }
+        }
+
+        // ⏱ NEGATIVE TIMER (YouTube-style)
+        video.addEventListener("timeupdate", () => {
+            if (video.buffered.length === 0) return
+
+            const liveEdge = video.buffered.end(video.buffered.length - 1)
+            const latency = liveEdge - video.currentTime
+
+            // 🎯 AUTO-CATCH LOGIC
+            if (latency > 1) {
+                video.playbackRate = 1.0
+            } else {
+                video.playbackRate = 1.0
+            }
+        })
+
+        // 🧠 USER SEEKS → leave live
+        video.addEventListener("seeking", () => {
+            isLive = false
+        })
+
+        // 🔁 TAB FIX
+        document.addEventListener("visibilitychange", () => {
+            if (!document.hidden) {
+                video.play().catch(() => { })
+                if (isLive) goLive()
+            }
+        })
+
+    </script>
+
+</body>
+
+</html>

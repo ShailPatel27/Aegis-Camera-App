@@ -1,8 +1,10 @@
 from ultralytics import YOLO
+from config.settings import YOLO_MODEL_PATH
+
 
 class Detector:
     def __init__(self):
-        self.model = YOLO("./models/yolov8n.pt")  # lightweight, fast
+        self.model = YOLO(YOLO_MODEL_PATH)
 
     def detect(self, frame):
         results = self.model(frame, verbose=False)[0]
@@ -15,7 +17,6 @@ class Detector:
             xyxy = box.xyxy[0].tolist()
 
             detections.append({
-                "class_id": cls_id,
                 "class_name": results.names[cls_id],
                 "confidence": conf,
                 "box": xyxy

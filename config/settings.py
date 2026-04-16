@@ -53,6 +53,7 @@ ACTIVITY_LOG_COOLDOWNS = {
     "threat": 60,
     "motion": 30,
     "loiter": 30,
+    "emergency": 5,
     "identity": 60,
     "register:sample": 2,
     "register:save": 2,
@@ -95,3 +96,15 @@ FACE_PRIMARY_MIN_RELATIVE_AREA = 0.30
 # Threat detection tuning
 THREAT_CLASS_NAMES = ("knife", "scissors")
 THREAT_MIN_CONFIDENCE = 0.55
+
+# Emergency pattern
+EMERGENCY_PATTERN_PATH = "data/emergency/pattern.json"
+EMERGENCY_PATTERN_STEPS = 4
+EMERGENCY_FINGER_NAMES = ("thumb", "index", "middle", "ring", "pinky")
+EMERGENCY_HAND_LANDMARKER_MODEL_PATH = "models/hand_landmarker.task"
+EMERGENCY_RESET_TIMEOUT_SECONDS = 8
+EMERGENCY_HAND_MAX_NUM = 1
+EMERGENCY_MIN_DETECTION_CONFIDENCE = 0.6
+EMERGENCY_MIN_PRESENCE_CONFIDENCE = 0.6
+EMERGENCY_MIN_TRACKING_CONFIDENCE = 0.6
+EMERGENCY_FRAME_SKIP = 2

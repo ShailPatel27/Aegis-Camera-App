@@ -289,6 +289,25 @@ class LivePage(QWidget):
                 now=current_time,
             )
 
+        if self.emergency.isChecked() and activity.get("emergency_total", 0) > 0:
+            if activity.get("emergency_captured"):
+                self._log_activity(
+                    event_key=f"emergency:progress:{activity['emergency_progress']}",
+                    message=(
+                        f"Emergency step captured "
+                        f"({activity['emergency_progress']}/{activity['emergency_total']})"
+                    ),
+                    cooldown_key="emergency",
+                    now=current_time,
+                )
+            if activity.get("emergency_triggered"):
+                self._log_activity(
+                    event_key="emergency:triggered",
+                    message="Emergency pattern sequence completed",
+                    cooldown_key="emergency",
+                    now=current_time,
+                )
+
         for face in faces:
             if face.get("matched") and face.get("name"):
                 self.log_identity_detected(face["name"], face.get("score"))

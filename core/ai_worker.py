@@ -12,6 +12,7 @@ from config.settings import (
     FACE_RECOGNITION_FRAME_SKIP,
     FACE_RECOGNITION_MATCH_IOU,
     FACE_RECOGNITION_UNKNOWN_LABEL,
+    EMERGENCY_FRAME_SKIP,
     FRAME_INTERVAL_MS,
     LOITER_DWELL_SECONDS,
     LOITER_MATCH_IOU,
@@ -22,6 +23,11 @@ from config.settings import (
 )
 from core.camera import Camera
 from core.detector import Detector
+from core.emergency import (
+    EmergencyPatternStore,
+    EmergencySequenceMatcher,
+    HandPatternDetector,
+)
 from core.face_engine import FaceEngine
 from core.motion import MotionDetector
 
@@ -38,6 +44,16 @@ class AIWorker(QThread):
         self.detector = Detector()
         self.motion = MotionDetector()
         self.face_engine = FaceEngine()
+        self.hand_detector = HandPatternDetector()
+        self.emergency_store = EmergencyPatternStore()
+        self.emergency_matcher = EmergencySequenceMatcher(self.emergency_store.load_steps())
+        self._last_emergency_status = {
+            "progress": 0,
+            "total": 0,
+            "remaining_reset_s": 0.0,
+            "captured": False,
+            "triggered": False,
+        }
 
         self.toggles = toggles
         self._previous_raw_detections = []
@@ -309,6 +325,49 @@ class AIWorker(QThread):
                     cv2.LINE_AA,
                 )
 
+            emergency_progress = 0
+            emergency_total = 0
+            emergency_remaining = 0.0
+            emergency_captured = False
+            emergency_triggered = False
+            if self.toggles.get("emergency") and self.toggles["emergency"]():
+                # Reload in case pattern changed in Emergency page.
+                self.emergency_matcher.set_steps(self.emergency_store.load_steps())
+                status = self.emergency_matcher.update(None, now=time.time())
+                if EMERGENCY_FRAME_SKIP <= 1 or frame_index % EMERGENCY_FRAME_SKIP == 0:
+                    hand_pattern = self.hand_detector.detect(frame, draw=True)
+                    status = self.emergency_matcher.update(hand_pattern, now=time.time())
+
+                self._last_emergency_status = status
+                emergency_progress = status["progress"]
+                emergency_total = status["total"]
+                emergency_remaining = status["remaining_reset_s"]
+                emergency_captured = status["captured"]
+                emergency_triggered = status["triggered"]
+
+                if emergency_total > 0:
+                    cv2.putText(
+                        frame,
+                        f"Emergency {emergency_progress}/{emergency_total} | reset {emergency_remaining:.1f}s",
+                        (20, 70),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.7,
+                        (255, 99, 71),
+                        2,
+                        cv2.LINE_AA,
+                    )
+                else:
+                    cv2.putText(
+                        frame,
+                        "Emergency pattern not configured",
+                        (20, 70),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.7,
+                        (255, 99, 71),
+                        2,
+                        cv2.LINE_AA,
+                    )
+
             self.raw_frame_ready.emit(raw_frame)
             vehicle_count = sum(1 for d in detections if d["class_name"] in ["car", "truck", "bus"])
             threat_count = sum(
@@ -325,6 +384,11 @@ class AIWorker(QThread):
                 "motion_count": motion_count,
                 "loiter_count": loiter_count,
                 "matched_faces": matched_faces,
+                "emergency_progress": emergency_progress,
+                "emergency_total": emergency_total,
+                "emergency_remaining_reset_s": emergency_remaining,
+                "emergency_captured": emergency_captured,
+                "emergency_triggered": emergency_triggered,
             }
             self.frame_ready.emit(frame, person_count, faces, activity)
 

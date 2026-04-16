@@ -12,6 +12,7 @@ from PyQt5.QtWidgets import (
 from app.pages.live import LivePage
 from app.pages.logs import LogsPage
 from app.pages.register import RegisterPage
+from app.pages.emergency import EmergencyPage
 from app.pages.settings import SettingsPage
 
 
@@ -40,7 +41,7 @@ class MainWindow(QMainWindow):
         main_layout.addLayout(content)
 
         self.sidebar = QListWidget()
-        self.sidebar.addItems(["Live Feed", "Logs", "Register", "Settings"])
+        self.sidebar.addItems(["Live Feed", "Logs", "Register", "Emergency", "Settings"])
         self.sidebar.setFixedWidth(200)
         self.sidebar.setFocusPolicy(Qt.NoFocus)
         self.sidebar.setStyleSheet(
@@ -69,15 +70,19 @@ class MainWindow(QMainWindow):
         self.logs_page = LogsPage()
         self.live_page = LivePage(self.logs_page)
         self.register_page = RegisterPage(self.logs_page)
+        self.emergency_page = EmergencyPage(self.logs_page)
         self.settings_page = SettingsPage()
 
         self.stack.addWidget(self.live_page)
         self.stack.addWidget(self.logs_page)
         self.stack.addWidget(self.register_page)
+        self.stack.addWidget(self.emergency_page)
         self.stack.addWidget(self.settings_page)
 
         self.live_page.worker_changed.connect(self.register_page.set_live_worker)
+        self.live_page.worker_changed.connect(self.emergency_page.set_live_worker)
         self.register_page.set_live_worker(self.live_page.worker)
+        self.emergency_page.set_live_worker(self.live_page.worker)
 
         self.sidebar.currentRowChanged.connect(self.on_nav_changed)
         self.sidebar.setCurrentRow(0)
@@ -90,5 +95,6 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         self.register_page.set_live_worker(None)
+        self.emergency_page.set_live_worker(None)
         self.live_page.stop_worker()
         super().closeEvent(event)

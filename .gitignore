@@ -73,3 +73,6 @@ Thumbs.db
 # Test Files
 */Test
 *test*
+
+# Users
+/data

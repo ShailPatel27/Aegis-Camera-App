@@ -32,6 +32,14 @@ def run_app():
     QLabel {
         color: white;
     }
+
+    QPushButton {
+        outline: none;
+    }
+
+    QPushButton:focus {
+        outline: none;
+    }
     """)
     window = MainWindow()
     window.show()

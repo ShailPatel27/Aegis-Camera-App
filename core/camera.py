@@ -10,3 +10,8 @@ class Camera:
         if not ret:
             return None
         return frame
+
+    def release(self):
+        if self.cap is not None:
+            self.cap.release()
+            self.cap = None

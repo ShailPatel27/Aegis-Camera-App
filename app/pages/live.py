@@ -1,75 +1,101 @@
-from PyQt5.QtWidgets import QWidget, QVBoxLayout, QLabel, QHBoxLayout
-from PyQt5.QtCore import QTimer, Qt
-from PyQt5.QtGui import QImage, QPixmap
 import time
+
 import cv2
+import numpy as np
+from PyQt5.QtCore import QTimer, Qt, pyqtSignal
+from PyQt5.QtGui import QImage, QPixmap
+from PyQt5.QtWidgets import (
+    QWidget,
+    QVBoxLayout,
+    QLabel,
+    QHBoxLayout,
+    QPushButton,
+    QGridLayout,
+)
+
+from app.widgets.toggle import ToggleSwitch
 from core.ai_worker import AIWorker
 from core.identity_memory import IdentityMemory
-from app.widgets.toggle import ToggleSwitch
-
 from config.settings import *
 
 
 class LivePage(QWidget):
+    worker_changed = pyqtSignal(object)
+
     def __init__(self, logger=None):
         super().__init__()
+        self.setStyleSheet(
+            """
+            QPushButton {
+                background-color: #dbeafe;
+                color: #0f172a;
+                border: 1px solid #93c5fd;
+                border-radius: 8px;
+                padding: 8px 14px;
+                font-weight: 600;
+                outline: none;
+                min-width: 110px;
+            }
+            QPushButton:hover {
+                background-color: #bfdbfe;
+            }
+            QPushButton:disabled {
+                background-color: #334155;
+                color: #94a3b8;
+                border: 1px solid #475569;
+            }
+            QPushButton:focus {
+                border: 1px solid #3b82f6;
+                outline: none;
+            }
+            """
+        )
 
         self.prev_time = time.time()
         self.frame_count = 0
         self.fps_accumulator = 0
         self.fps = 0
-        
         self.logger = logger
         self.event_last_logged = {}
         self.identity_memory = IdentityMemory()
+        self.worker = None
 
-        # FPS tracking
-        self.prev_time = time.time()
-        self.fps = 0
+        root = QVBoxLayout()
+        root.setContentsMargins(20, 20, 20, 20)
+        root.setSpacing(12)
+        self.setLayout(root)
 
-        layout = QVBoxLayout()
-        layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(10)
-        self.setLayout(layout)
-
-        # ===== TOP STATUS BAR =====
         top_bar = QHBoxLayout()
-
         self.status = QLabel("AI: ACTIVE")
-        self.status.setStyleSheet("color: #94a3b8;")
-
+        self.status.setStyleSheet("color: #94a3b8; font-weight: 600;")
         self.fps_label = QLabel("FPS: 0")
         self.fps_label.setStyleSheet("color: #94a3b8;")
-
         self.people_label = QLabel("People: 0")
         self.people_label.setStyleSheet("color: #94a3b8;")
-
         top_bar.addWidget(self.status)
         top_bar.addStretch()
         top_bar.addWidget(self.people_label)
         top_bar.addWidget(self.fps_label)
+        root.addLayout(top_bar)
 
-        layout.addLayout(top_bar)
-
-        # ===== VIDEO =====
         self.label = QLabel()
         self.label.setAlignment(Qt.AlignCenter)
         self.label.setMinimumSize(640, 480)
-        self.label.setStyleSheet("background-color: black; border-radius: 10px;")
-        layout.addWidget(self.label)
+        self.label.setStyleSheet("background-color: black; border-radius: 12px;")
+        root.addWidget(self.label, 1)
 
-        # ===== CONTROLS =====
-        row1 = QHBoxLayout()
-        row2 = QHBoxLayout()
+        controls = QGridLayout()
+        controls.setHorizontalSpacing(18)
+        controls.setVerticalSpacing(10)
 
         self.intrusion = ToggleSwitch("Intrusion")
         self.crowd = ToggleSwitch("Crowd")
         self.vehicle = ToggleSwitch("Vehicle")
-
         self.threat = ToggleSwitch("Threat")
         self.motion = ToggleSwitch("Motion")
         self.loiter = ToggleSwitch("Loitering")
         self.emergency = ToggleSwitch("Emergency")
+        self.face_recognition = ToggleSwitch("Face Recognition")
 
         self.intrusion.setChecked(DEFAULT_INTRUSION)
         self.crowd.setChecked(DEFAULT_CROWD)
@@ -78,58 +104,115 @@ class LivePage(QWidget):
         self.motion.setChecked(DEFAULT_MOTION)
         self.loiter.setChecked(DEFAULT_LOITER)
         self.emergency.setChecked(DEFAULT_EMERGENCY)
+        self.face_recognition.setChecked(DEFAULT_FACE_RECOGNITION)
 
-        for t in [self.intrusion, self.crowd, self.vehicle]:
-            row1.addWidget(t)
+        controls.addWidget(self.intrusion, 0, 0)
+        controls.addWidget(self.crowd, 0, 1)
+        controls.addWidget(self.vehicle, 0, 2)
+        controls.addWidget(self.threat, 1, 0)
+        controls.addWidget(self.motion, 1, 1)
+        controls.addWidget(self.loiter, 1, 2)
+        controls.addWidget(self.emergency, 2, 0)
+        controls.addWidget(self.face_recognition, 2, 1)
 
-        for t in [self.threat, self.motion, self.loiter, self.emergency]:
-            row2.addWidget(t)
+        action_bar = QHBoxLayout()
+        action_bar.setSpacing(10)
+        action_bar.addStretch()
 
-        layout.addLayout(row1)
-        layout.addLayout(row2)
+        self.start_btn = QPushButton("Start Feed")
+        self.start_btn.setStyleSheet(
+            "QPushButton { background-color: #16a34a; color: white; border: 1px solid #15803d; border-radius: 8px; padding: 8px 14px; font-weight: 700; }"
+            "QPushButton:hover { background-color: #15803d; }"
+            "QPushButton:disabled { background-color: #14532d; color: #bbf7d0; border: 1px solid #14532d; }"
+            "QPushButton:focus { border: 1px solid #22c55e; outline: none; }"
+        )
+        self.start_btn.clicked.connect(self.start_worker)
+        action_bar.addWidget(self.start_btn)
 
-        # Timer
+        self.pause_btn = QPushButton("Pause Feed")
+        self.pause_btn.clicked.connect(self.pause_worker)
+        action_bar.addWidget(self.pause_btn)
+
+        self.stop_btn = QPushButton("Stop Feed")
+        self.stop_btn.setStyleSheet(
+            "QPushButton { background-color: #7f1d1d; color: #fee2e2; border: 1px solid #991b1b; border-radius: 8px; padding: 8px 14px; font-weight: 700; }"
+            "QPushButton:hover { background-color: #991b1b; }"
+            "QPushButton:disabled { background-color: #450a0a; color: #fca5a5; border: 1px solid #450a0a; }"
+            "QPushButton:focus { border: 1px solid #ef4444; outline: none; }"
+        )
+        self.stop_btn.clicked.connect(self.stop_inactive)
+        action_bar.addWidget(self.stop_btn)
+
+        root.addLayout(controls)
+        root.addLayout(action_bar)
+
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_frame)
         self.timer.start(FRAME_INTERVAL_MS)
-        
-        self.worker = AIWorker({
-            "intrusion": self.intrusion.isChecked,
-            "crowd": self.crowd.isChecked,
-            "vehicle": self.vehicle.isChecked,
-            "threat": self.threat.isChecked,
-            "motion": self.motion.isChecked,
-        })
 
-        self.worker.frame_ready.connect(self.update_ui)
-        self.worker.start()
+        self.start_worker()
+
+    def _render_frame_to_label(self, frame):
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        h, w, ch = rgb.shape
+        img = QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888)
+        pix = QPixmap.fromImage(img)
+        if self.label.width() > 0 and self.label.height() > 0:
+            self.label.setPixmap(
+                pix.scaled(
+                    self.label.width(),
+                    self.label.height(),
+                    Qt.KeepAspectRatio,
+                    Qt.SmoothTransformation,
+                )
+            )
+
+    def _inactive_frame(self):
+        frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+        white = (240, 240, 240)
+        cx, cy = 640, 320
+        cv2.rectangle(frame, (cx - 120, cy - 70), (cx + 120, cy + 70), white, 6)
+        cv2.rectangle(frame, (cx - 55, cy - 100), (cx + 55, cy - 70), white, 6)
+        cv2.circle(frame, (cx, cy), 38, white, 6)
+        cv2.putText(
+            frame,
+            "CAMERA INACTIVE",
+            (470, 520),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1.1,
+            white,
+            2,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            frame,
+            "Press Start Feed to reactivate camera",
+            (430, 570),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.75,
+            white,
+            2,
+            cv2.LINE_AA,
+        )
+        return frame
 
     def update_frame(self):
-        # This function is now ONLY for UI timing / fallback
-        # AI processing is handled in AIWorker
+        pass
 
+    def update_ui(self, frame, person_count, faces):
         current_time = time.time()
-            
-    def update_ui(self, frame, person_count):
-        current_time = time.time()
-
-        # ===== FPS SMOOTHING =====
         delta = current_time - self.prev_time
         self.prev_time = current_time
-
         if delta > 0:
-            inst_fps = 1.0 / delta
-            self.fps_accumulator += inst_fps
+            self.fps_accumulator += 1.0 / delta
             self.frame_count += 1
 
         if self.frame_count >= FPS_SMOOTHING_WINDOW:
             self.fps = self.fps_accumulator / self.frame_count
             self.fps_label.setText(f"FPS: {int(self.fps)}")
-
             self.frame_count = 0
             self.fps_accumulator = 0
 
-        # ===== PEOPLE COUNT =====
         self.people_label.setText(f"People: {person_count}")
         if self.intrusion.isChecked() and person_count > 0:
             self._log_with_cooldown(
@@ -139,25 +222,68 @@ class LivePage(QWidget):
                 now=current_time,
             )
 
-        # ===== RENDER =====
-        if DISPLAY_MIRROR_FEED:
-            frame = cv2.flip(frame, 1)
+        for face in faces:
+            if face.get("matched") and face.get("name"):
+                self.log_identity_detected(face["name"], face.get("score"))
 
-        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        h, w, ch = frame.shape
+        self._render_frame_to_label(frame)
 
-        img = QImage(frame.data, w, h, ch * w, QImage.Format_RGB888)
-        pix = QPixmap.fromImage(img)
+    def _toggle_map(self):
+        return {
+            "intrusion": self.intrusion.isChecked,
+            "crowd": self.crowd.isChecked,
+            "vehicle": self.vehicle.isChecked,
+            "threat": self.threat.isChecked,
+            "motion": self.motion.isChecked,
+            "face_recognition": self.face_recognition.isChecked,
+        }
 
-        if self.label.width() > 0 and self.label.height() > 0:
-            self.label.setPixmap(
-                pix.scaled(
-                    self.label.width(),
-                    self.label.height(),
-                    Qt.KeepAspectRatio,
-                    Qt.SmoothTransformation
-                )
-            )
+    def start_worker(self):
+        if self.worker is not None:
+            return
+        self.worker = AIWorker(self._toggle_map())
+        self.worker.frame_ready.connect(self.update_ui)
+        self.worker.start()
+        self.status.setText("AI: ACTIVE")
+        self.start_btn.setEnabled(False)
+        self.pause_btn.setEnabled(True)
+        self.stop_btn.setEnabled(True)
+        self.worker_changed.emit(self.worker)
+
+    def pause_worker(self):
+        if self.worker is None:
+            return
+        self.worker.stop()
+        self.worker = None
+        self.status.setText("AI: PAUSED")
+        self.start_btn.setEnabled(True)
+        self.pause_btn.setEnabled(False)
+        self.stop_btn.setEnabled(True)
+        self.worker_changed.emit(None)
+
+    def stop_inactive(self):
+        if self.worker is not None:
+            self.worker.stop()
+            self.worker = None
+            self.worker_changed.emit(None)
+        self.status.setText("AI: INACTIVE")
+        self.people_label.setText("People: 0")
+        self.fps_label.setText("FPS: 0")
+        self.fps = 0
+        self.frame_count = 0
+        self.fps_accumulator = 0
+        self._render_frame_to_label(self._inactive_frame())
+        self.start_btn.setEnabled(True)
+        self.pause_btn.setEnabled(False)
+        self.stop_btn.setEnabled(False)
+
+    def stop_worker(self):
+        # Called by window close handler.
+        if self.worker is not None:
+            self.worker.stop()
+            self.worker = None
+            self.worker_changed.emit(None)
+        self.status.setText("AI: INACTIVE")
 
     def _log_with_cooldown(self, event_key, message, cooldown_seconds, now):
         if not self.logger:
@@ -173,9 +299,7 @@ class LivePage(QWidget):
         if not self.identity_memory.should_log_identity(user_id, now):
             return
 
-        confidence_text = ""
-        if confidence is not None:
-            confidence_text = f" ({confidence:.2f})"
+        confidence_text = f" ({confidence:.2f})" if confidence is not None else ""
         self._log_with_cooldown(
             event_key=f"identity:{user_id}",
             message=f"[{time.strftime('%H:%M:%S')}] User detected: {user_id}{confidence_text}",

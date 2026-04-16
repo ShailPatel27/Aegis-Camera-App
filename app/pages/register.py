@@ -1,8 +1,329 @@
-from PyQt5.QtWidgets import QWidget, QLabel, QVBoxLayout
+import cv2
+
+from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QImage, QPixmap
+from PyQt5.QtWidgets import (
+    QWidget,
+    QLabel,
+    QVBoxLayout,
+    QHBoxLayout,
+    QPushButton,
+    QLineEdit,
+    QListWidget,
+)
+
+from config.settings import (
+    FACE_PRIMARY_HOLD_FRAMES,
+    FACE_PRIMARY_MATCH_IOU,
+    FACE_PRIMARY_MIN_RELATIVE_AREA,
+    FACE_REGISTER_SAMPLES_REQUIRED,
+    FACE_RECOGNITION_UNKNOWN_LABEL,
+)
+from core.face_engine import FaceEngine
+
 
 class RegisterPage(QWidget):
     def __init__(self):
         super().__init__()
-        layout = QVBoxLayout()
-        layout.addWidget(QLabel("Face Registration"))
-        self.setLayout(layout)
+        self.face_engine = FaceEngine()
+        self.live_worker = None
+        self.current_frame = None
+        self.current_faces = []
+        self.primary_face = None
+        self.primary_miss_frames = 0
+        self.primary_match_name = None
+        self.primary_match_score = 0.0
+        self.pending_embeddings = []
+        self.setStyleSheet(
+            """
+            QLineEdit {
+                background-color: #f8fafc;
+                color: #0f172a;
+                border: 1px solid #cbd5e1;
+                border-radius: 8px;
+                padding: 8px 10px;
+            }
+            QLineEdit:focus {
+                border: 1px solid #2563eb;
+            }
+            QPushButton {
+                background-color: #e2e8f0;
+                color: #0f172a;
+                border: 1px solid #94a3b8;
+                border-radius: 8px;
+                padding: 8px 10px;
+                font-weight: 600;
+                outline: none;
+            }
+            QPushButton:hover {
+                background-color: #cbd5e1;
+            }
+            QPushButton:focus {
+                border: 1px solid #2563eb;
+                outline: none;
+            }
+            QListWidget {
+                background-color: #0b1224;
+                color: #e2e8f0;
+                border: 1px solid #1e293b;
+                border-radius: 8px;
+                padding: 6px;
+            }
+            QListWidget::item:selected {
+                background-color: #1d4ed8;
+                color: #ffffff;
+            }
+            """
+        )
+
+        root = QVBoxLayout()
+        root.setContentsMargins(20, 20, 20, 20)
+        root.setSpacing(12)
+        self.setLayout(root)
+
+        title = QLabel("Face Registration")
+        title.setStyleSheet("font-size: 18px; font-weight: 600;")
+        root.addWidget(title)
+
+        self.preview = QLabel("Feed not running. Start feed from Live page.")
+        self.preview.setAlignment(Qt.AlignCenter)
+        self.preview.setMinimumSize(320, 220)
+        self.preview.setStyleSheet("background: #000; border-radius: 10px; color: #94a3b8;")
+        root.addWidget(self.preview, 2)
+
+        row1 = QHBoxLayout()
+        row1.setSpacing(8)
+        root.addLayout(row1)
+
+        self.name_input = QLineEdit()
+        self.name_input.setPlaceholderText("Enter user name")
+        row1.addWidget(self.name_input, 2)
+
+        self.capture_btn = QPushButton("Capture Face Sample")
+        self.capture_btn.clicked.connect(self.capture_sample)
+        row1.addWidget(self.capture_btn, 1)
+
+        self.save_btn = QPushButton("Save Registered User")
+        self.save_btn.clicked.connect(self.save_user)
+        row1.addWidget(self.save_btn, 1)
+
+        row2 = QHBoxLayout()
+        row2.setSpacing(8)
+        root.addLayout(row2)
+
+        self.clear_btn = QPushButton("Clear Captured Samples")
+        self.clear_btn.clicked.connect(self.clear_samples)
+        row2.addWidget(self.clear_btn, 1)
+
+        self.delete_btn = QPushButton("Delete Selected User")
+        self.delete_btn.clicked.connect(self.delete_selected_user)
+        row2.addWidget(self.delete_btn, 1)
+
+        self.samples_label = QLabel(self._sample_text())
+        self.samples_label.setStyleSheet("color: #94a3b8;")
+        root.addWidget(self.samples_label)
+
+        self.status_label = QLabel("Align face and capture sample.")
+        self.status_label.setWordWrap(True)
+        self.status_label.setStyleSheet("color: #94a3b8;")
+        root.addWidget(self.status_label)
+
+        users_title = QLabel("Registered Users")
+        users_title.setStyleSheet("font-weight: 600;")
+        root.addWidget(users_title)
+
+        self.user_list = QListWidget()
+        root.addWidget(self.user_list, 1)
+
+        self.refresh_users()
+
+    def _sample_text(self):
+        return f"Samples: {len(self.pending_embeddings)}/{FACE_REGISTER_SAMPLES_REQUIRED}"
+
+    @staticmethod
+    def _face_area(face):
+        _, _, w, h = face
+        return max(0, int(w)) * max(0, int(h))
+
+    def set_status(self, text):
+        self.status_label.setText(text)
+
+    def refresh_users(self):
+        self.face_engine.registry = self.face_engine._load_registry()
+        self.user_list.clear()
+        for user in self.face_engine.list_users():
+            self.user_list.addItem(user)
+
+    def set_live_worker(self, worker):
+        if self.live_worker is not None:
+            try:
+                self.live_worker.raw_frame_ready.disconnect(self.on_live_frame)
+            except Exception:
+                pass
+        self.live_worker = worker
+        if self.live_worker is not None:
+            self.live_worker.raw_frame_ready.connect(self.on_live_frame)
+            self.set_status("Live feed connected. Align face and capture sample.")
+        else:
+            self.set_status("Feed stopped. Start feed from Live page.")
+
+    def _select_primary_face(self, faces):
+        if len(faces) == 0:
+            if self.primary_face is not None and self.primary_miss_frames < FACE_PRIMARY_HOLD_FRAMES:
+                self.primary_miss_frames += 1
+                return self.primary_face
+            self.primary_miss_frames = 0
+            self.primary_face = None
+            self.primary_match_name = None
+            self.primary_match_score = 0.0
+            return None
+
+        faces_sorted = sorted(faces, key=self._face_area, reverse=True)
+        biggest_area = self._face_area(faces_sorted[0])
+        stable_faces = [
+            f for f in faces_sorted
+            if self._face_area(f) >= biggest_area * FACE_PRIMARY_MIN_RELATIVE_AREA
+        ]
+
+        chosen = stable_faces[0]
+        if self.primary_face is not None:
+            best_iou = 0.0
+            best_face = None
+            for face in stable_faces:
+                iou = self.face_engine.box_iou_xywh(face, self.primary_face)
+                if iou > best_iou:
+                    best_iou = iou
+                    best_face = face
+            if best_face is not None and best_iou >= FACE_PRIMARY_MATCH_IOU:
+                chosen = best_face
+
+        self.primary_face = chosen
+        self.primary_miss_frames = 0
+        return chosen
+
+    def on_live_frame(self, frame):
+        self.current_frame = frame.copy()
+
+        faces = list(self.face_engine.detect_faces(self.current_frame))
+        self.current_faces = faces
+        primary = self._select_primary_face(faces)
+        self.primary_match_name = None
+        self.primary_match_score = 0.0
+        if primary is not None:
+            emb = self.face_engine.build_embedding(self.current_frame, primary)
+            match_name, match_score = self.face_engine.identify_embedding(emb)
+            self.primary_match_name = match_name
+            self.primary_match_score = match_score
+
+        display = self.current_frame.copy()
+        for face in faces:
+            x, y, w, h = face
+            color = (148, 163, 184)
+            thickness = 1
+            if primary is not None and tuple(face) == tuple(primary):
+                color = (16, 185, 129)
+                thickness = 2
+            cv2.rectangle(display, (x, y), (x + w, y + h), color, thickness)
+
+        if primary is not None:
+            px, py, _, _ = primary
+            label_y = py - 10 if py > 30 else py + 26
+            primary_text = "Primary face"
+            if self.primary_match_name:
+                primary_text = f"{self.primary_match_name} ({self.primary_match_score:.2f})"
+            cv2.putText(
+                display,
+                primary_text,
+                (px, label_y),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.55,
+                (16, 185, 129),
+                2,
+                cv2.LINE_AA,
+            )
+
+        if len(faces) == 0 and primary is None:
+            self.set_status("No face detected. Move closer and face camera.")
+        elif self.primary_match_name:
+            self.set_status(f"User already registered: {self.primary_match_name}")
+        elif len(faces) > 1:
+            self.set_status("Multiple faces detected. Largest stable face is selected.")
+        else:
+            self.set_status("Face ready. Capture sample.")
+
+        rgb = cv2.cvtColor(display, cv2.COLOR_BGR2RGB)
+        h, w, c = rgb.shape
+        img = QImage(rgb.data, w, h, c * w, QImage.Format_RGB888)
+        self.preview.setPixmap(
+            QPixmap.fromImage(img).scaled(
+                self.preview.width(),
+                self.preview.height(),
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation,
+            )
+        )
+
+    def capture_sample(self):
+        if self.current_frame is None:
+            self.set_status("Camera frame not available. Start feed first.")
+            return
+
+        if self.primary_face is None:
+            self.set_status("No stable primary face yet. Hold still and try again.")
+            return
+
+        if self.primary_match_name:
+            self.set_status(f"User already registered: {self.primary_match_name}")
+            return
+
+        emb = self.face_engine.build_embedding(self.current_frame, self.primary_face)
+        if emb is None:
+            self.set_status("Could not build face sample. Try again.")
+            return
+
+        self.pending_embeddings.append(emb)
+        self.samples_label.setText(self._sample_text())
+        self.set_status("Sample captured.")
+
+    def clear_samples(self):
+        self.pending_embeddings = []
+        self.samples_label.setText(self._sample_text())
+        self.set_status("Captured samples cleared.")
+
+    def save_user(self):
+        name = self.name_input.text()
+        if len(self.pending_embeddings) < FACE_REGISTER_SAMPLES_REQUIRED:
+            self.set_status(
+                f"Need at least {FACE_REGISTER_SAMPLES_REQUIRED} samples before saving."
+            )
+            return
+
+        try:
+            saved_name = self.face_engine.register_user(name, self.pending_embeddings)
+        except ValueError as exc:
+            self.set_status(str(exc))
+            return
+
+        self.pending_embeddings = []
+        self.samples_label.setText(self._sample_text())
+        self.name_input.setText("")
+        self.refresh_users()
+        self.set_status(f"User saved: {saved_name}")
+
+    def delete_selected_user(self):
+        item = self.user_list.currentItem()
+        if not item:
+            self.set_status("Select a user to delete.")
+            return
+
+        name = item.text().strip()
+        if not name or name == FACE_RECOGNITION_UNKNOWN_LABEL:
+            self.set_status("Invalid user selected.")
+            return
+
+        deleted = self.face_engine.delete_user(name)
+        if deleted:
+            self.refresh_users()
+            self.set_status(f"Deleted user: {name}")
+            return
+        self.set_status("User not found.")

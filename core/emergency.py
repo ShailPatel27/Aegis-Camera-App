@@ -8,6 +8,7 @@ from mediapipe.tasks import python as mp_python
 from mediapipe.tasks.python import vision
 
 from config.settings import (
+    DISPLAY_MIRROR_FEED,
     EMERGENCY_FINGER_NAMES,
     EMERGENCY_HAND_MAX_NUM,
     EMERGENCY_HAND_LANDMARKER_MODEL_PATH,
@@ -147,7 +148,14 @@ class HandPatternDetector:
         pinky_open = lm[20].y < lm[18].y
 
         # thumb: handedness-aware x comparison.
-        if handedness_label.lower() == "right":
+        effective_handedness = handedness_label.lower()
+        if DISPLAY_MIRROR_FEED:
+            if effective_handedness == "right":
+                effective_handedness = "left"
+            elif effective_handedness == "left":
+                effective_handedness = "right"
+
+        if effective_handedness == "right":
             thumb_open = lm[4].x < lm[3].x
         else:
             thumb_open = lm[4].x > lm[3].x

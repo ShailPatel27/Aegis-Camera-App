@@ -39,6 +39,7 @@ class AIWorker(QThread):
     def __init__(self, toggles):
         super().__init__()
         self.running = True
+        self._emergency_flash_until = 0.0
 
         self.camera = Camera()
         self.detector = Detector()
@@ -333,10 +334,13 @@ class AIWorker(QThread):
             if self.toggles.get("emergency") and self.toggles["emergency"]():
                 # Reload in case pattern changed in Emergency page.
                 self.emergency_matcher.set_steps(self.emergency_store.load_steps())
-                status = self.emergency_matcher.update(None, now=time.time())
+                now = time.time()
+                status = self.emergency_matcher.update(None, now=now)
                 if EMERGENCY_FRAME_SKIP <= 1 or frame_index % EMERGENCY_FRAME_SKIP == 0:
-                    hand_pattern = self.hand_detector.detect(frame, draw=True)
-                    status = self.emergency_matcher.update(hand_pattern, now=time.time())
+                    # Keep emergency hand landmarks exclusive to Emergency tab preview.
+                    hand_pattern = self.hand_detector.detect(frame, draw=False)
+                    now = time.time()
+                    status = self.emergency_matcher.update(hand_pattern, now=now)
 
                 self._last_emergency_status = status
                 emergency_progress = status["progress"]
@@ -344,29 +348,20 @@ class AIWorker(QThread):
                 emergency_remaining = status["remaining_reset_s"]
                 emergency_captured = status["captured"]
                 emergency_triggered = status["triggered"]
+                if emergency_triggered:
+                    self._emergency_flash_until = now + 1.0
 
-                if emergency_total > 0:
-                    cv2.putText(
-                        frame,
-                        f"Emergency {emergency_progress}/{emergency_total} | reset {emergency_remaining:.1f}s",
-                        (20, 70),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.7,
-                        (255, 99, 71),
-                        2,
-                        cv2.LINE_AA,
-                    )
-                else:
-                    cv2.putText(
-                        frame,
-                        "Emergency pattern not configured",
-                        (20, 70),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.7,
-                        (255, 99, 71),
-                        2,
-                        cv2.LINE_AA,
-                    )
+            if time.time() < self._emergency_flash_until:
+                cv2.putText(
+                    frame,
+                    "EMERGENCY!",
+                    (20, 70),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    1.0,
+                    (0, 0, 255),
+                    3,
+                    cv2.LINE_AA,
+                )
 
             self.raw_frame_ready.emit(raw_frame)
             vehicle_count = sum(1 for d in detections if d["class_name"] in ["car", "truck", "bus"])

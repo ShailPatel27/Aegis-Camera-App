@@ -1,56 +1,71 @@
-# .exe files
+
+# SYSTEM / BUILD
+dist/
+build/
+out/
+*.spec
+
+# EXECUTABLES
+*.exe
+*.dll
+
+# Keep ffmpeg locally but ignore it
 ffmpeg.exe
+bin/
+bin/*
 
-# Environment variables
+# ENV FILES
 .env
-.env.local
-.env.development.local
-.env.test.local
-.env.production.local
+.env.*
+!.env.example
 
-# Python virtual environments
-venv/
-env/
-.env/
-*/venv
-**/venv/
-
-# Models
-*.pt
-models/
-
-# Cache directories
+# PYTHON
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+venv/
+env/
+.venv/
+*/venv/
+**/venv/
+
+# MODELS (IMPORTANT)
+*.pt
+*.onnx
+models/
+
+# CACHE
 .cache/
 .parcel-cache/
 
-# Backup files
-*.bak
-*.backup
-
-# Temporary files and folders
+# TEMP FILES
 tmp/
 temp/
+*.tmp
 *tempCodeRunnerFile.py
 
-# Gatsby files
-.cache/
-public
+# MEDIA / GENERATED DATA
+chunks/
+*.avi
+*.mp4
 
-# IDE and Editor files
+# LOGS
+logs/
+*.log
+
+# IDE / EDITOR
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
 
-# Production builds
-dist/
-build/
-out/
+# JUPYTER
+.ipynb_checkpoints/
 
-# Video Files
-/chunks
-*.avi
-*.mp4
+# OS FILES
+.DS_Store
+Thumbs.db

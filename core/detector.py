@@ -2,7 +2,7 @@ from ultralytics import YOLO
 
 class Detector:
     def __init__(self):
-        self.model = YOLO("models/yolov8n.pt")  # lightweight, fast
+        self.model = YOLO("./models/yolov8n.pt")  # lightweight, fast
 
     def detect(self, frame):
         results = self.model(frame, verbose=False)[0]

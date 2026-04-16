@@ -69,3 +69,7 @@ logs/
 # OS FILES
 .DS_Store
 Thumbs.db
+
+# Test Files
+*/Test
+*test*

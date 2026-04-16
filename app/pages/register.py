@@ -1,4 +1,5 @@
 import cv2
+import time
 
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QImage, QPixmap
@@ -13,6 +14,8 @@ from PyQt5.QtWidgets import (
 )
 
 from config.settings import (
+    ACTIVITY_LOG_COOLDOWNS,
+    ACTIVITY_LOG_DEFAULT_COOLDOWN_SECONDS,
     FACE_PRIMARY_HOLD_FRAMES,
     FACE_PRIMARY_MATCH_IOU,
     FACE_PRIMARY_MIN_RELATIVE_AREA,
@@ -23,9 +26,11 @@ from core.face_engine import FaceEngine
 
 
 class RegisterPage(QWidget):
-    def __init__(self):
+    def __init__(self, logger=None):
         super().__init__()
         self.face_engine = FaceEngine()
+        self.logger = logger
+        self.event_last_logged = {}
         self.live_worker = None
         self.current_frame = None
         self.current_faces = []
@@ -100,10 +105,12 @@ class RegisterPage(QWidget):
         row1.addWidget(self.name_input, 2)
 
         self.capture_btn = QPushButton("Capture Face Sample")
+        self.capture_btn.setFocusPolicy(Qt.NoFocus)
         self.capture_btn.clicked.connect(self.capture_sample)
         row1.addWidget(self.capture_btn, 1)
 
         self.save_btn = QPushButton("Save Registered User")
+        self.save_btn.setFocusPolicy(Qt.NoFocus)
         self.save_btn.clicked.connect(self.save_user)
         row1.addWidget(self.save_btn, 1)
 
@@ -112,10 +119,12 @@ class RegisterPage(QWidget):
         root.addLayout(row2)
 
         self.clear_btn = QPushButton("Clear Captured Samples")
+        self.clear_btn.setFocusPolicy(Qt.NoFocus)
         self.clear_btn.clicked.connect(self.clear_samples)
         row2.addWidget(self.clear_btn, 1)
 
         self.delete_btn = QPushButton("Delete Selected User")
+        self.delete_btn.setFocusPolicy(Qt.NoFocus)
         self.delete_btn.clicked.connect(self.delete_selected_user)
         row2.addWidget(self.delete_btn, 1)
 
@@ -133,6 +142,7 @@ class RegisterPage(QWidget):
         root.addWidget(users_title)
 
         self.user_list = QListWidget()
+        self.user_list.setFocusPolicy(Qt.NoFocus)
         root.addWidget(self.user_list, 1)
 
         self.refresh_users()
@@ -147,6 +157,20 @@ class RegisterPage(QWidget):
 
     def set_status(self, text):
         self.status_label.setText(text)
+
+    def _resolve_cooldown(self, key):
+        return ACTIVITY_LOG_COOLDOWNS.get(key, ACTIVITY_LOG_DEFAULT_COOLDOWN_SECONDS)
+
+    def _log_activity(self, event_key, message, cooldown_key=None):
+        if not self.logger:
+            return
+        now = time.time()
+        cooldown = self._resolve_cooldown(cooldown_key or event_key)
+        last_logged = self.event_last_logged.get(event_key, 0.0)
+        if now - last_logged < cooldown:
+            return
+        self.logger.add_log(f"[{time.strftime('%H:%M:%S')}] {message}")
+        self.event_last_logged[event_key] = now
 
     def refresh_users(self):
         self.face_engine.registry = self.face_engine._load_registry()
@@ -164,8 +188,10 @@ class RegisterPage(QWidget):
         if self.live_worker is not None:
             self.live_worker.raw_frame_ready.connect(self.on_live_frame)
             self.set_status("Live feed connected. Align face and capture sample.")
+            self._log_activity("register:link:connected", "Register page linked to live feed", "register:link")
         else:
             self.set_status("Feed stopped. Start feed from Live page.")
+            self._log_activity("register:link:stopped", "Register page feed link stopped", "register:link")
 
     def _select_primary_face(self, faces):
         if len(faces) == 0:
@@ -274,6 +300,11 @@ class RegisterPage(QWidget):
 
         if self.primary_match_name:
             self.set_status(f"User already registered: {self.primary_match_name}")
+            self._log_activity(
+                f"register:duplicate:{self.primary_match_name}",
+                f"Duplicate registration blocked for {self.primary_match_name}",
+                "register:duplicate",
+            )
             return
 
         emb = self.face_engine.build_embedding(self.current_frame, self.primary_face)
@@ -284,11 +315,13 @@ class RegisterPage(QWidget):
         self.pending_embeddings.append(emb)
         self.samples_label.setText(self._sample_text())
         self.set_status("Sample captured.")
+        self._log_activity("register:sample", "Face sample captured", "register:sample")
 
     def clear_samples(self):
         self.pending_embeddings = []
         self.samples_label.setText(self._sample_text())
         self.set_status("Captured samples cleared.")
+        self._log_activity("register:sample:clear", "Captured face samples cleared", "register:sample")
 
     def save_user(self):
         name = self.name_input.text()
@@ -309,6 +342,7 @@ class RegisterPage(QWidget):
         self.name_input.setText("")
         self.refresh_users()
         self.set_status(f"User saved: {saved_name}")
+        self._log_activity(f"register:save:{saved_name}", f"User registered: {saved_name}", "register:save")
 
     def delete_selected_user(self):
         item = self.user_list.currentItem()
@@ -325,5 +359,6 @@ class RegisterPage(QWidget):
         if deleted:
             self.refresh_users()
             self.set_status(f"Deleted user: {name}")
+            self._log_activity(f"register:delete:{name}", f"User deleted: {name}", "register:delete")
             return
         self.set_status("User not found.")

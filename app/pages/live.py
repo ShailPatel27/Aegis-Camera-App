@@ -59,6 +59,8 @@ class LivePage(QWidget):
         self.event_last_logged = {}
         self.identity_memory = IdentityMemory()
         self.worker = None
+        self.feed_state = "inactive"
+        self.toggle_labels = {}
 
         root = QVBoxLayout()
         root.setContentsMargins(20, 20, 20, 20)
@@ -106,6 +108,25 @@ class LivePage(QWidget):
         self.emergency.setChecked(DEFAULT_EMERGENCY)
         self.face_recognition.setChecked(DEFAULT_FACE_RECOGNITION)
 
+        self.toggle_labels = {
+            self.intrusion: "Intrusion",
+            self.crowd: "Crowd",
+            self.vehicle: "Vehicle",
+            self.threat: "Threat",
+            self.motion: "Motion",
+            self.loiter: "Loitering",
+            self.emergency: "Emergency",
+            self.face_recognition: "Face Recognition",
+        }
+        for toggle, label in self.toggle_labels.items():
+            toggle.toggled.connect(
+                lambda checked, name=label: self._log_activity(
+                    event_key=f"toggle:{name.lower().replace(' ', '_')}",
+                    message=f"{name} {'enabled' if checked else 'disabled'}",
+                    cooldown_key="toggle",
+                )
+            )
+
         controls.addWidget(self.intrusion, 0, 0)
         controls.addWidget(self.crowd, 0, 1)
         controls.addWidget(self.vehicle, 0, 2)
@@ -120,6 +141,7 @@ class LivePage(QWidget):
         action_bar.addStretch()
 
         self.start_btn = QPushButton("Start Feed")
+        self.start_btn.setFocusPolicy(Qt.NoFocus)
         self.start_btn.setStyleSheet(
             "QPushButton { background-color: #16a34a; color: white; border: 1px solid #15803d; border-radius: 8px; padding: 8px 14px; font-weight: 700; }"
             "QPushButton:hover { background-color: #15803d; }"
@@ -130,10 +152,12 @@ class LivePage(QWidget):
         action_bar.addWidget(self.start_btn)
 
         self.pause_btn = QPushButton("Pause Feed")
+        self.pause_btn.setFocusPolicy(Qt.NoFocus)
         self.pause_btn.clicked.connect(self.pause_worker)
         action_bar.addWidget(self.pause_btn)
 
         self.stop_btn = QPushButton("Stop Feed")
+        self.stop_btn.setFocusPolicy(Qt.NoFocus)
         self.stop_btn.setStyleSheet(
             "QPushButton { background-color: #7f1d1d; color: #fee2e2; border: 1px solid #991b1b; border-radius: 8px; padding: 8px 14px; font-weight: 700; }"
             "QPushButton:hover { background-color: #991b1b; }"
@@ -199,7 +223,10 @@ class LivePage(QWidget):
     def update_frame(self):
         pass
 
-    def update_ui(self, frame, person_count, faces):
+    def update_ui(self, frame, person_count, faces, activity):
+        if self.feed_state != "active":
+            return
+
         current_time = time.time()
         delta = current_time - self.prev_time
         self.prev_time = current_time
@@ -214,11 +241,43 @@ class LivePage(QWidget):
             self.fps_accumulator = 0
 
         self.people_label.setText(f"People: {person_count}")
-        if self.intrusion.isChecked() and person_count > 0:
-            self._log_with_cooldown(
+        if self.intrusion.isChecked() and activity.get("person_count", 0) > 0:
+            self._log_activity(
                 event_key="intrusion:person",
-                message=f"[{time.strftime('%H:%M:%S')}] Person detected ({person_count})",
-                cooldown_seconds=INTRUSION_EVENT_COOLDOWN_SECONDS,
+                message=f"Person detected ({activity['person_count']})",
+                cooldown_key="intrusion",
+                now=current_time,
+            )
+
+        if self.crowd.isChecked() and activity.get("crowd_triggered"):
+            self._log_activity(
+                event_key="crowd:threshold",
+                message=f"Crowd threshold reached ({activity['person_count']})",
+                cooldown_key="crowd",
+                now=current_time,
+            )
+
+        if self.vehicle.isChecked() and activity.get("vehicle_count", 0) > 0:
+            self._log_activity(
+                event_key="vehicle:detected",
+                message=f"Vehicle detected ({activity['vehicle_count']})",
+                cooldown_key="vehicle",
+                now=current_time,
+            )
+
+        if self.threat.isChecked() and activity.get("threat_count", 0) > 0:
+            self._log_activity(
+                event_key="threat:detected",
+                message=f"Threat object detected ({activity['threat_count']})",
+                cooldown_key="threat",
+                now=current_time,
+            )
+
+        if self.motion.isChecked() and activity.get("motion_count", 0) > 0:
+            self._log_activity(
+                event_key="motion:detected",
+                message=f"Motion detected ({activity['motion_count']})",
+                cooldown_key="motion",
                 now=current_time,
             )
 
@@ -241,6 +300,7 @@ class LivePage(QWidget):
     def start_worker(self):
         if self.worker is not None:
             return
+        self.feed_state = "active"
         self.worker = AIWorker(self._toggle_map())
         self.worker.frame_ready.connect(self.update_ui)
         self.worker.start()
@@ -249,23 +309,27 @@ class LivePage(QWidget):
         self.pause_btn.setEnabled(True)
         self.stop_btn.setEnabled(True)
         self.worker_changed.emit(self.worker)
+        self._log_activity("feed:start", "Feed started", "feed:start")
 
     def pause_worker(self):
         if self.worker is None:
             return
         self.worker.stop()
         self.worker = None
+        self.feed_state = "paused"
         self.status.setText("AI: PAUSED")
         self.start_btn.setEnabled(True)
         self.pause_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
         self.worker_changed.emit(None)
+        self._log_activity("feed:pause", "Feed paused", "feed:pause")
 
     def stop_inactive(self):
         if self.worker is not None:
             self.worker.stop()
             self.worker = None
             self.worker_changed.emit(None)
+        self.feed_state = "inactive"
         self.status.setText("AI: INACTIVE")
         self.people_label.setText("People: 0")
         self.fps_label.setText("FPS: 0")
@@ -276,6 +340,7 @@ class LivePage(QWidget):
         self.start_btn.setEnabled(True)
         self.pause_btn.setEnabled(False)
         self.stop_btn.setEnabled(False)
+        self._log_activity("feed:stop", "Feed stopped (camera inactive)", "feed:stop")
 
     def stop_worker(self):
         # Called by window close handler.
@@ -283,7 +348,11 @@ class LivePage(QWidget):
             self.worker.stop()
             self.worker = None
             self.worker_changed.emit(None)
+        self.feed_state = "inactive"
         self.status.setText("AI: INACTIVE")
+
+    def _resolve_cooldown(self, key):
+        return ACTIVITY_LOG_COOLDOWNS.get(key, ACTIVITY_LOG_DEFAULT_COOLDOWN_SECONDS)
 
     def _log_with_cooldown(self, event_key, message, cooldown_seconds, now):
         if not self.logger:
@@ -291,8 +360,13 @@ class LivePage(QWidget):
         last_logged = self.event_last_logged.get(event_key, 0.0)
         if now - last_logged < cooldown_seconds:
             return
-        self.logger.add_log(message)
+        self.logger.add_log(f"[{time.strftime('%H:%M:%S')}] {message}")
         self.event_last_logged[event_key] = now
+
+    def _log_activity(self, event_key, message, cooldown_key=None, now=None):
+        now = time.time() if now is None else now
+        cooldown = self._resolve_cooldown(cooldown_key or event_key)
+        self._log_with_cooldown(event_key, message, cooldown, now)
 
     def log_identity_detected(self, user_id, confidence=None):
         now = time.time()
@@ -300,10 +374,10 @@ class LivePage(QWidget):
             return
 
         confidence_text = f" ({confidence:.2f})" if confidence is not None else ""
-        self._log_with_cooldown(
+        self._log_activity(
             event_key=f"identity:{user_id}",
-            message=f"[{time.strftime('%H:%M:%S')}] User detected: {user_id}{confidence_text}",
-            cooldown_seconds=IDENTITY_EVENT_COOLDOWN_SECONDS,
+            message=f"User detected: {user_id}{confidence_text}",
+            cooldown_key="identity",
             now=now,
         )
         self.identity_memory.mark_logged(user_id, now)

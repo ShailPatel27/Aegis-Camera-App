@@ -5,6 +5,7 @@ class ToggleSwitch(QCheckBox):
     def __init__(self, label=""):
         super().__init__(label)
         self.setCursor(Qt.PointingHandCursor)
+        self.setFocusPolicy(Qt.NoFocus)
 
         self.setStyleSheet("""
         QCheckBox {

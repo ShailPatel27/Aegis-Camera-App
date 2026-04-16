@@ -18,15 +18,54 @@ def run_app():
         background-color: #020617;
         border: none;
         padding: 10px;
+        outline: none;
     }
 
     QListWidget::item {
         padding: 12px;
         border-radius: 6px;
+        outline: none;
+        border: none;
     }
 
     QListWidget::item:selected {
         background-color: #2563eb;
+        outline: none;
+        border: none;
+    }
+
+    QListWidget::item:selected:active {
+        outline: none;
+        border: none;
+    }
+
+    QListWidget::item:selected:!active {
+        outline: none;
+        border: none;
+    }
+
+    QListView {
+        outline: none;
+    }
+
+    QListView::item {
+        outline: none;
+        border: none;
+    }
+
+    QListView::item:selected {
+        outline: none;
+        border: none;
+    }
+
+    QListView::item:selected:active {
+        outline: none;
+        border: none;
+    }
+
+    QListView::item:selected:!active {
+        outline: none;
+        border: none;
     }
 
     QLabel {

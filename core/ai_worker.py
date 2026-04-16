@@ -1,7 +1,9 @@
 import cv2
+import time
 from PyQt5.QtCore import QThread, pyqtSignal
 
 from config.settings import (
+    CROWD_THRESHOLD,
     DETECTION_CONFIRM_FRAMES,
     DETECTION_MATCH_IOU,
     DISPLAY_MIRROR_FEED,
@@ -10,6 +12,9 @@ from config.settings import (
     FACE_RECOGNITION_FRAME_SKIP,
     FACE_RECOGNITION_MATCH_IOU,
     FACE_RECOGNITION_UNKNOWN_LABEL,
+    FRAME_INTERVAL_MS,
+    THREAT_CLASS_NAMES,
+    THREAT_MIN_CONFIDENCE,
     YOLO_INFERENCE_FRAME_SKIP,
 )
 from core.camera import Camera
@@ -19,7 +24,7 @@ from core.motion import MotionDetector
 
 
 class AIWorker(QThread):
-    frame_ready = pyqtSignal(object, int, object)
+    frame_ready = pyqtSignal(object, int, object, object)
     raw_frame_ready = pyqtSignal(object)
 
     def __init__(self, toggles):
@@ -131,6 +136,8 @@ class AIWorker(QThread):
         last_detections = []
         last_person_count = 0
         last_faces = []
+        frame_interval_s = max(0.0, FRAME_INTERVAL_MS / 1000.0)
+        next_emit_at = time.perf_counter()
 
         while self.running:
             frame = self.camera.get_frame()
@@ -196,20 +203,58 @@ class AIWorker(QThread):
             for det in detections:
                 x1, y1, x2, y2 = map(int, det["box"])
                 cls = det["class_name"]
+                conf = float(det.get("confidence", 0.0))
 
                 if cls == "person" and self.toggles["intrusion"]():
-                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    # Translucent border for person boxes.
+                    overlay = frame.copy()
+                    cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    cv2.addWeighted(overlay, 0.45, frame, 0.55, 0, frame)
 
                 if cls in ["car", "truck", "bus"] and self.toggles["vehicle"]():
                     cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 200, 0), 2)
+                    cv2.putText(
+                        frame,
+                        f"{cls} {conf:.2f}",
+                        (x1, max(y1 - 10, 20)),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.55,
+                        (255, 200, 0),
+                        2,
+                        cv2.LINE_AA,
+                    )
 
-                if cls in ["knife", "scissors"] and self.toggles["threat"]():
+                if cls in THREAT_CLASS_NAMES and self.toggles["threat"]() and conf >= THREAT_MIN_CONFIDENCE:
                     cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
+                    cv2.putText(
+                        frame,
+                        f"{cls} {conf:.2f}",
+                        (x1, max(y1 - 10, 20)),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.55,
+                        (0, 0, 255),
+                        2,
+                        cv2.LINE_AA,
+                    )
 
+            motion_count = 0
             if self.toggles["motion"]():
                 boxes = self.motion.detect(frame)
+                motion_count = len(boxes)
                 for (x1, y1, x2, y2) in boxes:
                     cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 255, 0), 2)
+
+            if self.toggles["crowd"]() and person_count >= CROWD_THRESHOLD:
+                cv2.putText(
+                    frame,
+                    f"CROWD ALERT ({person_count})",
+                    (20, 40),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.8,
+                    (0, 140, 255),
+                    2,
+                    cv2.LINE_AA,
+                )
 
             for face in faces:
                 x1, y1, x2, y2 = face["box"]
@@ -231,7 +276,30 @@ class AIWorker(QThread):
                 )
 
             self.raw_frame_ready.emit(raw_frame)
-            self.frame_ready.emit(frame, person_count, faces)
+            vehicle_count = sum(1 for d in detections if d["class_name"] in ["car", "truck", "bus"])
+            threat_count = sum(
+                1
+                for d in detections
+                if d["class_name"] in THREAT_CLASS_NAMES and float(d.get("confidence", 0.0)) >= THREAT_MIN_CONFIDENCE
+            )
+            matched_faces = [f["name"] for f in faces if f.get("matched") and f.get("name")]
+            activity = {
+                "person_count": person_count,
+                "crowd_triggered": person_count >= CROWD_THRESHOLD,
+                "vehicle_count": vehicle_count,
+                "threat_count": threat_count,
+                "motion_count": motion_count,
+                "matched_faces": matched_faces,
+            }
+            self.frame_ready.emit(frame, person_count, faces, activity)
+
+            if frame_interval_s > 0:
+                next_emit_at += frame_interval_s
+                sleep_for = next_emit_at - time.perf_counter()
+                if sleep_for > 0:
+                    time.sleep(sleep_for)
+                else:
+                    next_emit_at = time.perf_counter()
 
         self.camera.release()
 

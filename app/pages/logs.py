@@ -1,3 +1,4 @@
+from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QWidget, QVBoxLayout, QListWidget
 from pathlib import Path
 from config.settings import LOCAL_LOG_FILE_PATH, LOCAL_LOG_UI_MAX_ITEMS
@@ -10,6 +11,7 @@ class LogsPage(QWidget):
         self.setLayout(layout)
 
         self.log_list = QListWidget()
+        self.log_list.setFocusPolicy(Qt.NoFocus)
         layout.addWidget(self.log_list)
 
     def add_log(self, message):

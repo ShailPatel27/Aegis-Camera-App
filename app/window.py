@@ -1,3 +1,4 @@
+from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
     QLabel,
     QMainWindow,
@@ -41,12 +42,33 @@ class MainWindow(QMainWindow):
         self.sidebar = QListWidget()
         self.sidebar.addItems(["Live Feed", "Logs", "Register", "Settings"])
         self.sidebar.setFixedWidth(200)
+        self.sidebar.setFocusPolicy(Qt.NoFocus)
+        self.sidebar.setStyleSheet(
+            """
+            QListWidget::item:selected {
+                outline: none;
+                border: none;
+            }
+            QListWidget::item:selected:active {
+                outline: none;
+                border: none;
+            }
+            QListWidget::item:selected:!active {
+                outline: none;
+                border: none;
+            }
+            QListWidget::item:focus {
+                outline: none;
+                border: none;
+            }
+            """
+        )
 
         self.stack = QStackedWidget()
 
         self.logs_page = LogsPage()
         self.live_page = LivePage(self.logs_page)
-        self.register_page = RegisterPage()
+        self.register_page = RegisterPage(self.logs_page)
         self.settings_page = SettingsPage()
 
         self.stack.addWidget(self.live_page)

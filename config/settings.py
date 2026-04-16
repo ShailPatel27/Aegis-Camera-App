@@ -36,6 +36,24 @@ LOG_COOLDOWN = 2  # seconds
 INTRUSION_EVENT_COOLDOWN_SECONDS = 20
 LOCAL_LOG_FILE_PATH = "data/logs/events.log"
 LOCAL_LOG_UI_MAX_ITEMS = 300
+ACTIVITY_LOG_DEFAULT_COOLDOWN_SECONDS = 10
+ACTIVITY_LOG_COOLDOWNS = {
+    "feed:start": 2,
+    "feed:pause": 2,
+    "feed:stop": 2,
+    "toggle": 1,
+    "intrusion": 60,
+    "crowd": 60,
+    "vehicle": 60,
+    "threat": 60,
+    "motion": 30,
+    "identity": 60,
+    "register:sample": 2,
+    "register:save": 2,
+    "register:delete": 2,
+    "register:duplicate": 8,
+    "register:link": 4,
+}
 
 # Recording / chunk upload pipeline
 RECORD_FPS = 10
@@ -67,3 +85,7 @@ FACE_PREVIEW_INTERVAL_MS = 60
 FACE_PRIMARY_HOLD_FRAMES = 2
 FACE_PRIMARY_MATCH_IOU = 0.30
 FACE_PRIMARY_MIN_RELATIVE_AREA = 0.30
+
+# Threat detection tuning
+THREAT_CLASS_NAMES = ("knife", "scissors")
+THREAT_MIN_CONFIDENCE = 0.55

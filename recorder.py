@@ -6,6 +6,7 @@ import threading
 from queue import Queue
 from supabase import create_client
 from dotenv import load_dotenv
+from config.settings import RECORD_FPS, RECORD_CHUNK_SECONDS, FFMPEG_PATH
 
 load_dotenv()
 
@@ -16,8 +17,8 @@ BUCKET = os.getenv("BUCKET")
 USER_ID = "demo-user"
 CAM_ID = "main-cam"
 
-FPS = 10
-CHUNK_SECONDS = 5
+FPS = RECORD_FPS
+CHUNK_SECONDS = RECORD_CHUNK_SECONDS
 FRAMES_PER_CHUNK = FPS * CHUNK_SECONDS
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -35,7 +36,7 @@ def worker():
 
         # 🔁 encode
         subprocess.run([
-            "./ffmpeg.exe",
+            FFMPEG_PATH,
             "-y",
             "-i", avi_path,
             "-r", str(FPS),

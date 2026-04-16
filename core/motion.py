@@ -1,5 +1,5 @@
 import cv2
-from config.settings import MOTION_THRESHOLD, MOTION_MIN_AREA
+from config.settings import MOTION_THRESHOLD, MOTION_MIN_AREA, MOTION_DILATE_ITERATIONS
 
 
 class MotionDetector:
@@ -18,7 +18,7 @@ class MotionDetector:
 
         diff = cv2.absdiff(self.prev_gray, gray)
         _, thresh = cv2.threshold(diff, MOTION_THRESHOLD, 255, cv2.THRESH_BINARY)
-        thresh = cv2.dilate(thresh, None, iterations=2)
+        thresh = cv2.dilate(thresh, None, iterations=MOTION_DILATE_ITERATIONS)
 
         contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 

@@ -3,10 +3,8 @@ from PyQt5.QtCore import QTimer, Qt
 from PyQt5.QtGui import QImage, QPixmap
 import time
 import cv2
-
-from core.camera import Camera
-from core.detector import Detector
-from core.motion import MotionDetector
+from core.ai_worker import AIWorker
+from core.identity_memory import IdentityMemory
 from app.widgets.toggle import ToggleSwitch
 
 from config.settings import *
@@ -16,12 +14,14 @@ class LivePage(QWidget):
     def __init__(self, logger=None):
         super().__init__()
 
+        self.prev_time = time.time()
+        self.frame_count = 0
+        self.fps_accumulator = 0
+        self.fps = 0
+        
         self.logger = logger
-        self.last_log_time = 0
-
-        self.camera = Camera()
-        self.detector = Detector()
-        self.motion_detector = MotionDetector()
+        self.event_last_logged = {}
+        self.identity_memory = IdentityMemory()
 
         # FPS tracking
         self.prev_time = time.time()
@@ -92,71 +92,57 @@ class LivePage(QWidget):
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_frame)
         self.timer.start(FRAME_INTERVAL_MS)
+        
+        self.worker = AIWorker({
+            "intrusion": self.intrusion.isChecked,
+            "crowd": self.crowd.isChecked,
+            "vehicle": self.vehicle.isChecked,
+            "threat": self.threat.isChecked,
+            "motion": self.motion.isChecked,
+        })
+
+        self.worker.frame_ready.connect(self.update_ui)
+        self.worker.start()
 
     def update_frame(self):
-        frame = self.camera.get_frame()
-        if frame is None:
-            return
+        # This function is now ONLY for UI timing / fallback
+        # AI processing is handled in AIWorker
 
         current_time = time.time()
+            
+    def update_ui(self, frame, person_count):
+        current_time = time.time()
 
-        # ===== FPS CALCULATION =====
+        # ===== FPS SMOOTHING =====
         delta = current_time - self.prev_time
-        if delta > 0:
-            self.fps = 1.0 / delta
         self.prev_time = current_time
 
-        self.fps_label.setText(f"FPS: {self.fps:.1f}")
+        if delta > 0:
+            inst_fps = 1.0 / delta
+            self.fps_accumulator += inst_fps
+            self.frame_count += 1
 
-        # ===== YOLO =====
-        run_yolo = any([
-            self.intrusion.isChecked(),
-            self.crowd.isChecked(),
-            self.vehicle.isChecked(),
-            self.threat.isChecked()
-        ])
+        if self.frame_count >= FPS_SMOOTHING_WINDOW:
+            self.fps = self.fps_accumulator / self.frame_count
+            self.fps_label.setText(f"FPS: {int(self.fps)}")
 
-        detections = []
-        if run_yolo:
-            detections = self.detector.detect(frame)
+            self.frame_count = 0
+            self.fps_accumulator = 0
 
-        person_count = 0
-
-        for det in detections:
-            x1, y1, x2, y2 = map(int, det["box"])
-            cls = det["class_name"]
-
-            if cls == "person":
-                person_count += 1
-
-                if self.intrusion.isChecked():
-                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-
-            if cls in ["car", "truck", "bus"] and self.vehicle.isChecked():
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 200, 0), 2)
-
-            if cls in ["knife", "scissors"] and self.threat.isChecked():
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
-
-        # ===== PEOPLE COUNT UI =====
+        # ===== PEOPLE COUNT =====
         self.people_label.setText(f"People: {person_count}")
-
-        # ===== MOTION =====
-        if self.motion.isChecked():
-            motion_boxes = self.motion_detector.detect(frame)
-
-            for (x1, y1, x2, y2) in motion_boxes:
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 255, 0), 2)
-
-        # ===== LOGGING =====
         if self.intrusion.isChecked() and person_count > 0:
-            if self.logger and current_time - self.last_log_time > LOG_COOLDOWN:
-                self.logger.add_log(
-                    f"[{time.strftime('%H:%M:%S')}] Person detected ({person_count})"
-                )
-                self.last_log_time = current_time
+            self._log_with_cooldown(
+                event_key="intrusion:person",
+                message=f"[{time.strftime('%H:%M:%S')}] Person detected ({person_count})",
+                cooldown_seconds=INTRUSION_EVENT_COOLDOWN_SECONDS,
+                now=current_time,
+            )
 
         # ===== RENDER =====
+        if DISPLAY_MIRROR_FEED:
+            frame = cv2.flip(frame, 1)
+
         frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         h, w, ch = frame.shape
 
@@ -172,3 +158,28 @@ class LivePage(QWidget):
                     Qt.SmoothTransformation
                 )
             )
+
+    def _log_with_cooldown(self, event_key, message, cooldown_seconds, now):
+        if not self.logger:
+            return
+        last_logged = self.event_last_logged.get(event_key, 0.0)
+        if now - last_logged < cooldown_seconds:
+            return
+        self.logger.add_log(message)
+        self.event_last_logged[event_key] = now
+
+    def log_identity_detected(self, user_id, confidence=None):
+        now = time.time()
+        if not self.identity_memory.should_log_identity(user_id, now):
+            return
+
+        confidence_text = ""
+        if confidence is not None:
+            confidence_text = f" ({confidence:.2f})"
+        self._log_with_cooldown(
+            event_key=f"identity:{user_id}",
+            message=f"[{time.strftime('%H:%M:%S')}] User detected: {user_id}{confidence_text}",
+            cooldown_seconds=IDENTITY_EVENT_COOLDOWN_SECONDS,
+            now=now,
+        )
+        self.identity_memory.mark_logged(user_id, now)

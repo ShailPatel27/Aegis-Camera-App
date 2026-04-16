@@ -1,5 +1,5 @@
 from ultralytics import YOLO
-from config.settings import YOLO_MODEL_PATH
+from config.settings import YOLO_MODEL_PATH, YOLO_MIN_CONFIDENCE
 
 
 class Detector:
@@ -14,6 +14,8 @@ class Detector:
         for box in results.boxes:
             cls_id = int(box.cls[0])
             conf = float(box.conf[0])
+            if conf < YOLO_MIN_CONFIDENCE:
+                continue
             xyxy = box.xyxy[0].tolist()
 
             detections.append({

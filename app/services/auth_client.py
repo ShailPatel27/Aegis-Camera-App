@@ -1,5 +1,6 @@
 import json
 import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Optional, Tuple
@@ -106,22 +107,30 @@ class AuthClient:
         return {"Authorization": f"Bearer {token}"}
 
     def _get_existing_camera(self, token: str) -> Optional[Dict]:
-        get_resp = requests.get(
-            f"{self.base_url}/api/cameras",
-            headers=self._auth_headers(token),
-            timeout=20,
-        )
-        if get_resp.status_code in (401, 403):
-            raise PermissionError("Session expired")
+        for attempt in range(2):
+            get_resp = requests.get(
+                f"{self.base_url}/api/cameras",
+                headers=self._auth_headers(token),
+                timeout=20,
+            )
+            if get_resp.status_code in (401, 403):
+                raise PermissionError("Session expired")
 
-        if get_resp.ok:
-            cameras = get_resp.json()
-            if isinstance(cameras, list) and len(cameras) > 0:
-                preferred = next(
-                    (c for c in cameras if int(c.get("selected_camera", -1)) == int(CAMERA_INDEX)),
-                    cameras[0],
-                )
-                return self._merge_camera_with_defaults(preferred)
+            if get_resp.ok:
+                cameras = get_resp.json()
+                if isinstance(cameras, list) and len(cameras) > 0:
+                    preferred = next(
+                        (c for c in cameras if int(c.get("selected_camera", -1)) == int(CAMERA_INDEX)),
+                        cameras[0],
+                    )
+                    return self._merge_camera_with_defaults(preferred)
+                return None
+
+            # Occasionally backend routes may not be ready yet on first request.
+            if get_resp.status_code == 404 and attempt == 0:
+                time.sleep(0.35)
+                continue
+            break
         return None
 
     def get_current_user(self, token: str) -> Dict:
@@ -259,6 +268,76 @@ class AuthClient:
 
         if isinstance(updated_camera, dict):
             camera = self._merge_camera_with_defaults(updated_camera)
+
+        self._save_session(token, user, camera)
+        return camera
+
+    def set_camera_stream_state(self, session: Dict, enabled: bool) -> Dict:
+        if not isinstance(session, dict):
+            raise ValueError("Missing session")
+
+        token = session.get("token")
+        user = dict(session.get("user", {}))
+        camera = dict(session.get("camera", {}))
+        camera_id = camera.get("id")
+        if not token or not camera_id:
+            raise ValueError("Missing authenticated camera session")
+
+        response = requests.patch(
+            f"{self.base_url}/api/cameras/{camera_id}/stream",
+            headers={**self._auth_headers(token), "Content-Type": "application/json"},
+            json={"enabled": bool(enabled)},
+            timeout=20,
+        )
+        if response.status_code in (401, 403):
+            raise PermissionError("Session expired")
+        if not response.ok:
+            raise ValueError("Failed to update camera stream state")
+
+        payload = response.json()
+        updated = payload.get("camera") if isinstance(payload, dict) else None
+        if isinstance(updated, dict):
+            camera = self._merge_camera_with_defaults(updated)
+        else:
+            camera["status"] = "online" if enabled else "offline"
+            camera = self._merge_camera_with_defaults(camera)
+
+        self._save_session(token, user, camera)
+        return camera
+
+    def set_camera_paused(self, session: Dict, paused: bool) -> Dict:
+        if not isinstance(session, dict):
+            raise ValueError("Missing session")
+
+        token = session.get("token")
+        user = dict(session.get("user", {}))
+        camera = dict(session.get("camera", {}))
+        camera_id = camera.get("id")
+        if not token or not camera_id:
+            raise ValueError("Missing authenticated camera session")
+
+        current_config = camera.get("config") if isinstance(camera.get("config"), dict) else {}
+        config = dict(current_config)
+        config["feed_paused"] = bool(paused)
+
+        response = requests.patch(
+            f"{self.base_url}/api/cameras/{camera_id}/config",
+            headers={**self._auth_headers(token), "Content-Type": "application/json"},
+            json={"config": config},
+            timeout=20,
+        )
+        if response.status_code in (401, 403):
+            raise PermissionError("Session expired")
+        if not response.ok:
+            raise ValueError("Failed to update camera pause state")
+
+        payload = response.json()
+        updated = payload.get("camera") if isinstance(payload, dict) else None
+        if isinstance(updated, dict):
+            camera = self._merge_camera_with_defaults(updated)
+        else:
+            camera["config"] = config
+            camera = self._merge_camera_with_defaults(camera)
 
         self._save_session(token, user, camera)
         return camera

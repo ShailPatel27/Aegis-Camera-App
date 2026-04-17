@@ -69,6 +69,7 @@ class LivePage(QWidget):
         self.toggle_controls = {}
         self._session_invalid_emitted = False
         self._sync_in_progress = False
+        self._applying_remote_state = False
 
         root = QVBoxLayout()
         root.setContentsMargins(20, 20, 20, 20)
@@ -163,32 +164,15 @@ class LivePage(QWidget):
         action_bar.setSpacing(10)
         action_bar.addStretch()
 
-        self.start_btn = QPushButton("Start Feed")
-        self.start_btn.setFocusPolicy(Qt.NoFocus)
-        self.start_btn.setStyleSheet(
-            "QPushButton { background-color: #16a34a; color: white; border: 1px solid #15803d; border-radius: 8px; padding: 8px 14px; font-weight: 700; }"
-            "QPushButton:hover { background-color: #15803d; }"
-            "QPushButton:disabled { background-color: #14532d; color: #bbf7d0; border: 1px solid #14532d; }"
-            "QPushButton:focus { border: 1px solid #22c55e; outline: none; }"
-        )
-        self.start_btn.clicked.connect(self.start_worker)
-        action_bar.addWidget(self.start_btn)
+        self.stream_btn = QPushButton("Start Feed")
+        self.stream_btn.setFocusPolicy(Qt.NoFocus)
+        self.stream_btn.clicked.connect(self._on_stream_button_clicked)
+        action_bar.addWidget(self.stream_btn)
 
-        self.pause_btn = QPushButton("Pause Feed")
-        self.pause_btn.setFocusPolicy(Qt.NoFocus)
-        self.pause_btn.clicked.connect(self.pause_worker)
-        action_bar.addWidget(self.pause_btn)
-
-        self.stop_btn = QPushButton("Stop Feed")
-        self.stop_btn.setFocusPolicy(Qt.NoFocus)
-        self.stop_btn.setStyleSheet(
-            "QPushButton { background-color: #7f1d1d; color: #fee2e2; border: 1px solid #991b1b; border-radius: 8px; padding: 8px 14px; font-weight: 700; }"
-            "QPushButton:hover { background-color: #991b1b; }"
-            "QPushButton:disabled { background-color: #450a0a; color: #fca5a5; border: 1px solid #450a0a; }"
-            "QPushButton:focus { border: 1px solid #ef4444; outline: none; }"
-        )
-        self.stop_btn.clicked.connect(self.stop_inactive)
-        action_bar.addWidget(self.stop_btn)
+        self.pause_resume_btn = QPushButton("Pause")
+        self.pause_resume_btn.setFocusPolicy(Qt.NoFocus)
+        self.pause_resume_btn.clicked.connect(self._on_pause_resume_clicked)
+        action_bar.addWidget(self.pause_resume_btn)
 
         root.addLayout(controls)
         root.addLayout(action_bar)
@@ -201,8 +185,10 @@ class LivePage(QWidget):
         self.sync_timer.start()
 
         self._refresh_toggles_from_db()
+        self._update_control_buttons()
 
         self.start_worker()
+        self._sync_with_backend()
 
     def _bind_toggle(self, toggle, label, key):
         toggle.toggled.connect(
@@ -260,6 +246,7 @@ class LivePage(QWidget):
             if isinstance(refreshed, dict):
                 self.session = refreshed
                 self._apply_toggle_values(auth_client.get_ai_toggles(refreshed))
+                self._apply_remote_stream_state()
             return
         if status == "invalid":
             self._emit_session_invalid(payload.get("reason") or "Session expired")
@@ -270,6 +257,107 @@ class LivePage(QWidget):
         self._session_invalid_emitted = True
         self.stop_worker()
         self.session_invalid.emit(reason or "Session expired")
+
+    def _is_remote_stream_enabled(self):
+        camera = self.session.get("camera", {}) if isinstance(self.session, dict) else {}
+        if not isinstance(camera, dict):
+            return False
+        return (camera.get("stream_enabled") is True) or (camera.get("status") == "online")
+
+    def _is_remote_paused(self):
+        camera = self.session.get("camera", {}) if isinstance(self.session, dict) else {}
+        if not isinstance(camera, dict):
+            return False
+        config = camera.get("config") if isinstance(camera.get("config"), dict) else {}
+        return bool(config.get("feed_paused", False))
+
+    def _apply_remote_stream_state(self):
+        if self._applying_remote_state:
+            return
+        self._applying_remote_state = True
+        try:
+            stream_enabled = self._is_remote_stream_enabled()
+            paused = self._is_remote_paused()
+
+            if not stream_enabled:
+                if self.feed_state != "inactive":
+                    self.stop_inactive(sync_remote=False)
+                self._update_control_buttons()
+                return
+
+            if paused:
+                if self.feed_state == "active":
+                    self.pause_worker(sync_remote=False)
+                elif self.feed_state == "inactive":
+                    self.start_worker(sync_remote=False)
+                    self.pause_worker(sync_remote=False)
+                self._update_control_buttons()
+                return
+
+            if self.feed_state != "active":
+                self.start_worker(sync_remote=False)
+            self._update_control_buttons()
+        finally:
+            self._applying_remote_state = False
+
+    def _update_control_buttons(self):
+        if self.feed_state == "inactive":
+            self.stream_btn.setText("Start Feed")
+            self.stream_btn.setStyleSheet(
+                "QPushButton { background-color: #16a34a; color: white; border: 1px solid #15803d; border-radius: 8px; padding: 8px 14px; font-weight: 700; }"
+                "QPushButton:hover { background-color: #15803d; }"
+                "QPushButton:disabled { background-color: #14532d; color: #bbf7d0; border: 1px solid #14532d; }"
+                "QPushButton:focus { border: 1px solid #22c55e; outline: none; }"
+            )
+            self.pause_resume_btn.setText("Pause")
+            self.pause_resume_btn.setEnabled(False)
+        elif self.feed_state == "paused":
+            self.stream_btn.setText("Stop Feed")
+            self.stream_btn.setStyleSheet(
+                "QPushButton { background-color: #7f1d1d; color: #fee2e2; border: 1px solid #991b1b; border-radius: 8px; padding: 8px 14px; font-weight: 700; }"
+                "QPushButton:hover { background-color: #991b1b; }"
+                "QPushButton:disabled { background-color: #450a0a; color: #fca5a5; border: 1px solid #450a0a; }"
+                "QPushButton:focus { border: 1px solid #ef4444; outline: none; }"
+            )
+            self.pause_resume_btn.setText("Resume")
+            self.pause_resume_btn.setEnabled(True)
+        else:
+            self.stream_btn.setText("Stop Feed")
+            self.stream_btn.setStyleSheet(
+                "QPushButton { background-color: #7f1d1d; color: #fee2e2; border: 1px solid #991b1b; border-radius: 8px; padding: 8px 14px; font-weight: 700; }"
+                "QPushButton:hover { background-color: #991b1b; }"
+                "QPushButton:disabled { background-color: #450a0a; color: #fca5a5; border: 1px solid #450a0a; }"
+                "QPushButton:focus { border: 1px solid #ef4444; outline: none; }"
+            )
+            self.pause_resume_btn.setText("Pause")
+            self.pause_resume_btn.setEnabled(True)
+
+        if self.feed_state == "paused":
+            self.pause_resume_btn.setStyleSheet(
+                "QPushButton { background-color: #16a34a; color: #ffffff; border: 1px solid #15803d; border-radius: 8px; padding: 8px 14px; font-weight: 700; }"
+                "QPushButton:hover { background-color: #15803d; }"
+                "QPushButton:disabled { background-color: #14532d; color: #bbf7d0; border: 1px solid #14532d; }"
+                "QPushButton:focus { border: 1px solid #22c55e; outline: none; }"
+            )
+        else:
+            self.pause_resume_btn.setStyleSheet(
+                "QPushButton { background-color: #ca8a04; color: #fffbeb; border: 1px solid #a16207; border-radius: 8px; padding: 8px 14px; font-weight: 700; }"
+                "QPushButton:hover { background-color: #a16207; }"
+                "QPushButton:disabled { background-color: #713f12; color: #fde68a; border: 1px solid #713f12; }"
+                "QPushButton:focus { border: 1px solid #f59e0b; outline: none; }"
+            )
+
+    def _on_stream_button_clicked(self):
+        if self.feed_state == "inactive":
+            self.start_worker(sync_remote=True)
+        else:
+            self.stop_inactive(sync_remote=True)
+
+    def _on_pause_resume_clicked(self):
+        if self.feed_state == "active":
+            self.pause_worker(sync_remote=True)
+        elif self.feed_state == "paused":
+            self.start_worker(sync_remote=True)
 
     def _apply_toggle_values(self, toggles):
         for key, toggle in self.toggle_controls.items():
@@ -453,24 +541,31 @@ class LivePage(QWidget):
             "screenshot": self.screenshot.isChecked,
         }
 
-    def start_worker(self):
+    def start_worker(self, sync_remote=True):
         if self.worker is not None:
             return
         self._refresh_toggles_from_db()
-        self._sync_with_backend()
         self.feed_state = "active"
         self._reset_fps_metrics()
         self.worker = AIWorker(self._toggle_map())
         self.worker.frame_ready.connect(self.update_ui)
         self.worker.start()
         self.status.setText("AI: ACTIVE")
-        self.start_btn.setEnabled(False)
-        self.pause_btn.setEnabled(True)
-        self.stop_btn.setEnabled(True)
+        self._update_control_buttons()
         self.worker_changed.emit(self.worker)
         self._log_activity("feed:start", "Feed started", "feed:start")
+        if sync_remote:
+            try:
+                updated = auth_client.set_camera_stream_state(self.session, True)
+                self.session["camera"] = updated
+                updated = auth_client.set_camera_paused(self.session, False)
+                self.session["camera"] = updated
+            except PermissionError as exc:
+                self._emit_session_invalid(str(exc))
+            except Exception:
+                pass
 
-    def pause_worker(self):
+    def pause_worker(self, sync_remote=True):
         if self.worker is None:
             return
         self.worker.stop()
@@ -478,13 +573,21 @@ class LivePage(QWidget):
         self.feed_state = "paused"
         self._reset_fps_metrics()
         self.status.setText("AI: PAUSED")
-        self.start_btn.setEnabled(True)
-        self.pause_btn.setEnabled(False)
-        self.stop_btn.setEnabled(True)
+        self._update_control_buttons()
         self.worker_changed.emit(None)
         self._log_activity("feed:pause", "Feed paused", "feed:pause")
+        if sync_remote:
+            try:
+                updated = auth_client.set_camera_stream_state(self.session, True)
+                self.session["camera"] = updated
+                updated = auth_client.set_camera_paused(self.session, True)
+                self.session["camera"] = updated
+            except PermissionError as exc:
+                self._emit_session_invalid(str(exc))
+            except Exception:
+                pass
 
-    def stop_inactive(self):
+    def stop_inactive(self, sync_remote=True):
         if self.worker is not None:
             self.worker.stop()
             self.worker = None
@@ -494,10 +597,18 @@ class LivePage(QWidget):
         self.people_label.setText("People: 0")
         self._reset_fps_metrics()
         self._render_frame_to_label(self._inactive_frame())
-        self.start_btn.setEnabled(True)
-        self.pause_btn.setEnabled(False)
-        self.stop_btn.setEnabled(False)
+        self._update_control_buttons()
         self._log_activity("feed:stop", "Feed stopped (camera inactive)", "feed:stop")
+        if sync_remote:
+            try:
+                updated = auth_client.set_camera_stream_state(self.session, False)
+                self.session["camera"] = updated
+                updated = auth_client.set_camera_paused(self.session, False)
+                self.session["camera"] = updated
+            except PermissionError as exc:
+                self._emit_session_invalid(str(exc))
+            except Exception:
+                pass
 
     def stop_worker(self):
         # Called by window close handler.
@@ -509,6 +620,7 @@ class LivePage(QWidget):
             self.worker_changed.emit(None)
         self.feed_state = "inactive"
         self.status.setText("AI: INACTIVE")
+        self._update_control_buttons()
 
     def _resolve_cooldown(self, key):
         return ACTIVITY_LOG_COOLDOWNS.get(key, ACTIVITY_LOG_DEFAULT_COOLDOWN_SECONDS)

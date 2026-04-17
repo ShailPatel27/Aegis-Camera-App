@@ -37,7 +37,15 @@ class AccountPage(QWidget):
         self.name_label = QLabel()
         self.email_label = QLabel()
         self.phone_label = QLabel()
-        for label in (self.name_label, self.email_label, self.phone_label):
+        self.camera_name_label = QLabel()
+        self.camera_id_label = QLabel()
+        for label in (
+            self.name_label,
+            self.email_label,
+            self.phone_label,
+            self.camera_name_label,
+            self.camera_id_label,
+        ):
             label.setStyleSheet("font-size: 14px; color: #cbd5e1;")
             root.addWidget(label)
 
@@ -61,3 +69,6 @@ class AccountPage(QWidget):
         self.email_label.setText(f"Email: {self.user.get('email', '-')}")
         phone = self.user.get("phone") or self.user.get("alternate_contact") or "-"
         self.phone_label.setText(f"Contact: {phone}")
+        camera = self.user.get("camera") or {}
+        self.camera_name_label.setText(f"Camera Name: {camera.get('name') or '-'}")
+        self.camera_id_label.setText(f"Camera ID: {camera.get('id') or self.user.get('camera_id') or '-'}")

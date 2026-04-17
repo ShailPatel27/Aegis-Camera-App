@@ -112,7 +112,7 @@ class SettingsPage(QWidget):
 
         note = QLabel(
             "Adjust key camera settings, then save to persist into config/settings.py.\n"
-            "Restart the app after saving to ensure all modules use updated values."
+            "AI toggles are managed from Live/Monitor and synced via database."
         )
         note.setStyleSheet("color: #94a3b8;")
         root.addWidget(note)
@@ -137,7 +137,6 @@ class SettingsPage(QWidget):
         content_layout.setSpacing(10)
         content.setLayout(content_layout)
 
-        content_layout.addWidget(self._build_default_toggles_group())
         content_layout.addWidget(self._build_performance_group())
         content_layout.addWidget(self._build_detection_group())
         content_layout.addWidget(self._build_face_group())
@@ -166,25 +165,6 @@ class SettingsPage(QWidget):
         self.save_btn.clicked.connect(self.save_settings)
         actions.addWidget(self.save_btn)
 
-    def _build_default_toggles_group(self):
-        group = QGroupBox("Default Detection Toggles")
-        layout = QFormLayout()
-        layout.setLabelAlignment(Qt.AlignLeft)
-        layout.setFormAlignment(Qt.AlignTop)
-        layout.setHorizontalSpacing(16)
-        layout.setVerticalSpacing(8)
-        group.setLayout(layout)
-
-        self._add_bool(layout, "Intrusion", "DEFAULT_INTRUSION")
-        self._add_bool(layout, "Crowd", "DEFAULT_CROWD")
-        self._add_bool(layout, "Vehicle", "DEFAULT_VEHICLE")
-        self._add_bool(layout, "Threat", "DEFAULT_THREAT")
-        self._add_bool(layout, "Motion", "DEFAULT_MOTION")
-        self._add_bool(layout, "Loitering", "DEFAULT_LOITER")
-        self._add_bool(layout, "Emergency", "DEFAULT_EMERGENCY")
-        self._add_bool(layout, "Face Recognition", "DEFAULT_FACE_RECOGNITION")
-        return group
-
     def _build_performance_group(self):
         group = QGroupBox("Camera & Performance")
         layout = QFormLayout()
@@ -194,6 +174,7 @@ class SettingsPage(QWidget):
 
         self._add_int(layout, "Camera Index", "CAMERA_INDEX", 0, 8)
         self._add_int(layout, "Frame Interval (ms)", "FRAME_INTERVAL_MS", 15, 250, slider=True)
+        self._add_int(layout, "Idle Frame Interval (ms)", "IDLE_FRAME_INTERVAL_MS", 15, 500, slider=True)
         self._add_int(layout, "YOLO Frame Skip", "YOLO_INFERENCE_FRAME_SKIP", 1, 12, slider=True)
         return group
 

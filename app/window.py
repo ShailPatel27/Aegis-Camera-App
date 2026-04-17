@@ -50,7 +50,8 @@ class MainWindow(QMainWindow):
 
     def _show_app(self, session):
         self.session = session
-        user = session.get("user", {})
+        user = dict(session.get("user", {}))
+        user["camera"] = session.get("camera", {})
 
         main_widget = QWidget()
         self.setCentralWidget(main_widget)
@@ -97,7 +98,7 @@ class MainWindow(QMainWindow):
         self.stack = QStackedWidget()
 
         self.logs_page = LogsPage()
-        self.live_page = LivePage(self.logs_page)
+        self.live_page = LivePage(self.logs_page, session=session)
         self.register_page = RegisterPage(self.logs_page)
         self.emergency_page = EmergencyPage(self.logs_page)
         self.settings_page = SettingsPage()
@@ -112,6 +113,7 @@ class MainWindow(QMainWindow):
 
         self.live_page.worker_changed.connect(self.register_page.set_live_worker)
         self.live_page.worker_changed.connect(self.emergency_page.set_live_worker)
+        self.live_page.session_invalid.connect(self._handle_session_invalid)
         self.register_page.set_live_worker(self.live_page.worker)
         self.emergency_page.set_live_worker(self.live_page.worker)
         self.account_page.logout_requested.connect(self._logout)
@@ -126,6 +128,10 @@ class MainWindow(QMainWindow):
         self._show_app(session)
 
     def _logout(self):
+        auth_client.clear_session()
+        self._show_auth()
+
+    def _handle_session_invalid(self, _reason):
         auth_client.clear_session()
         self._show_auth()
 

@@ -1,8 +1,9 @@
 import time
+import threading
 
 import cv2
 import numpy as np
-from PyQt5.QtCore import QTimer, Qt, pyqtSignal
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtWidgets import (
     QWidget,
@@ -14,6 +15,7 @@ from PyQt5.QtWidgets import (
 )
 
 from app.widgets.toggle import ToggleSwitch
+from app.services.auth_client import auth_client
 from core.ai_worker import AIWorker
 from core.identity_memory import IdentityMemory
 from config.settings import *
@@ -21,8 +23,10 @@ from config.settings import *
 
 class LivePage(QWidget):
     worker_changed = pyqtSignal(object)
+    session_invalid = pyqtSignal(str)
+    session_sync_result = pyqtSignal(object)
 
-    def __init__(self, logger=None):
+    def __init__(self, logger=None, session=None):
         super().__init__()
         self.setStyleSheet(
             """
@@ -56,11 +60,15 @@ class LivePage(QWidget):
         self.fps_accumulator = 0
         self.fps = 0
         self.logger = logger
+        self.session = session if isinstance(session, dict) else auth_client.load_session()
         self.event_last_logged = {}
         self.identity_memory = IdentityMemory()
         self.worker = None
         self.feed_state = "inactive"
         self.toggle_labels = {}
+        self.toggle_controls = {}
+        self._session_invalid_emitted = False
+        self._sync_in_progress = False
 
         root = QVBoxLayout()
         root.setContentsMargins(20, 20, 20, 20)
@@ -98,6 +106,7 @@ class LivePage(QWidget):
         self.loiter = ToggleSwitch("Loitering")
         self.emergency = ToggleSwitch("Emergency")
         self.face_recognition = ToggleSwitch("Face Recognition")
+        self.screenshot = ToggleSwitch("Screenshot")
 
         self.intrusion.setChecked(DEFAULT_INTRUSION)
         self.crowd.setChecked(DEFAULT_CROWD)
@@ -107,6 +116,18 @@ class LivePage(QWidget):
         self.loiter.setChecked(DEFAULT_LOITER)
         self.emergency.setChecked(DEFAULT_EMERGENCY)
         self.face_recognition.setChecked(DEFAULT_FACE_RECOGNITION)
+
+        self.toggle_controls = {
+            "intrusion": self.intrusion,
+            "crowd": self.crowd,
+            "vehicle": self.vehicle,
+            "threat": self.threat,
+            "motion": self.motion,
+            "loiter": self.loiter,
+            "emergency": self.emergency,
+            "face_recognition": self.face_recognition,
+            "screenshot": self.screenshot,
+        }
 
         self.toggle_labels = {
             self.intrusion: "Intrusion",
@@ -118,14 +139,15 @@ class LivePage(QWidget):
             self.emergency: "Emergency",
             self.face_recognition: "Face Recognition",
         }
-        for toggle, label in self.toggle_labels.items():
-            toggle.toggled.connect(
-                lambda checked, name=label: self._log_activity(
-                    event_key=f"toggle:{name.lower().replace(' ', '_')}",
-                    message=f"{name} {'enabled' if checked else 'disabled'}",
-                    cooldown_key="toggle",
-                )
-            )
+        self._bind_toggle(self.intrusion, "Intrusion", "intrusion")
+        self._bind_toggle(self.crowd, "Crowd", "crowd")
+        self._bind_toggle(self.vehicle, "Vehicle", "vehicle")
+        self._bind_toggle(self.threat, "Threat", "threat")
+        self._bind_toggle(self.motion, "Motion", "motion")
+        self._bind_toggle(self.loiter, "Loitering", "loiter")
+        self._bind_toggle(self.emergency, "Emergency", "emergency")
+        self._bind_toggle(self.face_recognition, "Face Recognition", "face_recognition")
+        self._bind_toggle(self.screenshot, "Screenshot", "screenshot")
 
         controls.addWidget(self.intrusion, 0, 0)
         controls.addWidget(self.crowd, 0, 1)
@@ -135,6 +157,7 @@ class LivePage(QWidget):
         controls.addWidget(self.loiter, 1, 2)
         controls.addWidget(self.emergency, 2, 0)
         controls.addWidget(self.face_recognition, 2, 1)
+        controls.addWidget(self.screenshot, 2, 2)
 
         action_bar = QHBoxLayout()
         action_bar.setSpacing(10)
@@ -170,11 +193,114 @@ class LivePage(QWidget):
         root.addLayout(controls)
         root.addLayout(action_bar)
 
-        self.timer = QTimer()
-        self.timer.timeout.connect(self.update_frame)
-        self.timer.start(FRAME_INTERVAL_MS)
+        self.session_sync_result.connect(self._on_session_sync_result)
+
+        self.sync_timer = QTimer(self)
+        self.sync_timer.setInterval(5000)
+        self.sync_timer.timeout.connect(self._sync_with_backend)
+        self.sync_timer.start()
+
+        self._refresh_toggles_from_db()
 
         self.start_worker()
+
+    def _bind_toggle(self, toggle, label, key):
+        toggle.toggled.connect(
+            lambda checked, name=label: self._log_activity(
+                event_key=f"toggle:{name.lower().replace(' ', '_')}",
+                message=f"{name} {'enabled' if checked else 'disabled'}",
+                cooldown_key="toggle",
+            )
+        )
+        toggle.toggled.connect(lambda checked, toggle_key=key: self._persist_toggle_change(toggle_key, checked))
+
+    def _refresh_toggles_from_db(self):
+        session = self.session if isinstance(self.session, dict) else auth_client.load_session()
+        if not isinstance(session, dict):
+            return
+
+        toggles = auth_client.get_ai_toggles(session)
+        self._apply_toggle_values(toggles)
+        self.session = session
+
+    def _sync_with_backend(self):
+        if self._sync_in_progress:
+            return
+
+        session = self.session if isinstance(self.session, dict) else auth_client.load_session()
+        if not isinstance(session, dict):
+            return
+
+        self._sync_in_progress = True
+        snapshot = dict(session)
+        threading.Thread(
+            target=self._run_session_sync_worker,
+            args=(snapshot,),
+            daemon=True,
+        ).start()
+
+    def _run_session_sync_worker(self, session_snapshot):
+        try:
+            refreshed = auth_client.refresh_session(session_snapshot)
+            self.session_sync_result.emit({"status": "ok", "session": refreshed})
+        except PermissionError as exc:
+            self.session_sync_result.emit({"status": "invalid", "reason": str(exc)})
+        except Exception:
+            # Ignore transient errors; next timer tick retries.
+            self.session_sync_result.emit({"status": "error"})
+
+    def _on_session_sync_result(self, payload):
+        self._sync_in_progress = False
+        if not isinstance(payload, dict):
+            return
+
+        status = payload.get("status")
+        if status == "ok":
+            refreshed = payload.get("session")
+            if isinstance(refreshed, dict):
+                self.session = refreshed
+                self._apply_toggle_values(auth_client.get_ai_toggles(refreshed))
+            return
+        if status == "invalid":
+            self._emit_session_invalid(payload.get("reason") or "Session expired")
+
+    def _emit_session_invalid(self, reason):
+        if self._session_invalid_emitted:
+            return
+        self._session_invalid_emitted = True
+        self.stop_worker()
+        self.session_invalid.emit(reason or "Session expired")
+
+    def _apply_toggle_values(self, toggles):
+        for key, toggle in self.toggle_controls.items():
+            if key not in toggles:
+                continue
+            toggle.blockSignals(True)
+            toggle.setChecked(bool(toggles[key]))
+            toggle.blockSignals(False)
+
+    def _persist_toggle_change(self, toggle_key, enabled):
+        if not isinstance(self.session, dict):
+            self.session = auth_client.load_session()
+        if not isinstance(self.session, dict):
+            return
+
+        try:
+            updated_camera = auth_client.update_ai_toggle(self.session, toggle_key, enabled)
+            if isinstance(updated_camera, dict):
+                self.session["camera"] = updated_camera
+        except PermissionError as exc:
+            self._emit_session_invalid(str(exc))
+        except Exception:
+            # Keep UI responsive even if network/db sync fails.
+            pass
+
+    def _reset_fps_metrics(self):
+        self.prev_time = time.time()
+        self.fps = 0
+        self.frame_count = 0
+        self.fps_accumulator = 0
+        self.fps_label.setText("FPS: 0")
 
     def _render_frame_to_label(self, frame):
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -324,12 +450,16 @@ class LivePage(QWidget):
             "loiter": self.loiter.isChecked,
             "emergency": self.emergency.isChecked,
             "face_recognition": self.face_recognition.isChecked,
+            "screenshot": self.screenshot.isChecked,
         }
 
     def start_worker(self):
         if self.worker is not None:
             return
+        self._refresh_toggles_from_db()
+        self._sync_with_backend()
         self.feed_state = "active"
+        self._reset_fps_metrics()
         self.worker = AIWorker(self._toggle_map())
         self.worker.frame_ready.connect(self.update_ui)
         self.worker.start()
@@ -346,6 +476,7 @@ class LivePage(QWidget):
         self.worker.stop()
         self.worker = None
         self.feed_state = "paused"
+        self._reset_fps_metrics()
         self.status.setText("AI: PAUSED")
         self.start_btn.setEnabled(True)
         self.pause_btn.setEnabled(False)
@@ -361,10 +492,7 @@ class LivePage(QWidget):
         self.feed_state = "inactive"
         self.status.setText("AI: INACTIVE")
         self.people_label.setText("People: 0")
-        self.fps_label.setText("FPS: 0")
-        self.fps = 0
-        self.frame_count = 0
-        self.fps_accumulator = 0
+        self._reset_fps_metrics()
         self._render_frame_to_label(self._inactive_frame())
         self.start_btn.setEnabled(True)
         self.pause_btn.setEnabled(False)
@@ -373,6 +501,8 @@ class LivePage(QWidget):
 
     def stop_worker(self):
         # Called by window close handler.
+        if hasattr(self, "sync_timer") and self.sync_timer.isActive():
+            self.sync_timer.stop()
         if self.worker is not None:
             self.worker.stop()
             self.worker = None

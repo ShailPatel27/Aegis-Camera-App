@@ -22,24 +22,56 @@ class FaceEngine:
         cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
         self.face_cascade = cv2.CascadeClassifier(cascade_path)
         self.db_path = Path(FACE_DB_PATH)
+        self._last_registry_mtime = None
         self.registry = self._load_registry()
 
     def _load_registry(self):
+        current_mtime = None
+        if self.db_path.exists():
+            try:
+                current_mtime = self.db_path.stat().st_mtime
+            except Exception:
+                current_mtime = None
+
         if not self.db_path.exists():
+            self._last_registry_mtime = None
             return {}
         try:
             data = json.loads(self.db_path.read_text(encoding="utf-8"))
             if isinstance(data, dict):
+                self._last_registry_mtime = current_mtime
                 return data
         except Exception:
             pass
+        self._last_registry_mtime = current_mtime
         return {}
 
     def _save_registry(self):
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.db_path.write_text(json.dumps(self.registry, indent=2), encoding="utf-8")
+        try:
+            self._last_registry_mtime = self.db_path.stat().st_mtime
+        except Exception:
+            self._last_registry_mtime = None
+
+    def reload_if_changed(self):
+        # Runtime sync: keep face identities current without app restart.
+        if not self.db_path.exists():
+            if self.registry:
+                self.registry = {}
+            self._last_registry_mtime = None
+            return
+
+        try:
+            current_mtime = self.db_path.stat().st_mtime
+        except Exception:
+            return
+
+        if self._last_registry_mtime is None or current_mtime != self._last_registry_mtime:
+            self.registry = self._load_registry()
 
     def list_users(self):
+        self.reload_if_changed()
         return sorted(self.registry.keys())
 
     def delete_user(self, name):
@@ -100,6 +132,7 @@ class FaceEngine:
         return name if FACE_REGISTRATION_CASE_SENSITIVE else name.lower()
 
     def identify_embedding(self, embedding, threshold=None):
+        self.reload_if_changed()
         if embedding is None:
             return None, 0.0
         emb_vec = np.array(embedding, dtype=np.float32)
@@ -177,6 +210,7 @@ class FaceEngine:
         return key_name
 
     def recognize(self, frame):
+        self.reload_if_changed()
         results = []
         faces = self.detect_faces(frame)
         for (x, y, w, h) in faces:

@@ -14,6 +14,7 @@ from config.settings import (
     FACE_RECOGNITION_UNKNOWN_LABEL,
     EMERGENCY_FRAME_SKIP,
     FRAME_INTERVAL_MS,
+    IDLE_FRAME_INTERVAL_MS,
     LOITER_DWELL_SECONDS,
     LOITER_MATCH_IOU,
     LOITER_TRACK_STALE_SECONDS,
@@ -386,6 +387,21 @@ class AIWorker(QThread):
                 "emergency_triggered": emergency_triggered,
             }
             self.frame_ready.emit(frame, person_count, faces, activity)
+
+            # Dynamic pacing: use idle frame interval when no notable activity is present.
+            has_activity = any(
+                [
+                    person_count > 0,
+                    vehicle_count > 0,
+                    threat_count > 0,
+                    loiter_count > 0,
+                    len(matched_faces) > 0,
+                    emergency_captured,
+                    emergency_triggered,
+                ]
+            )
+            interval_ms = FRAME_INTERVAL_MS if has_activity else IDLE_FRAME_INTERVAL_MS
+            frame_interval_s = max(0.0, interval_ms / 1000.0)
 
             if frame_interval_s > 0:
                 next_emit_at += frame_interval_s

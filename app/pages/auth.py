@@ -7,6 +7,7 @@ from PyQt5.QtWidgets import (
     QLineEdit,
     QPushButton,
     QTabWidget,
+    QInputDialog,
 )
 
 from app.services.auth_client import auth_client
@@ -160,6 +161,9 @@ class AuthPage(QWidget):
             return
         try:
             session = auth_client.login(email, password)
+            session = self._ensure_camera_named(session)
+            if not session:
+                return
             self._set_status("Login successful.", ok=True)
             self.auth_success.emit(session)
         except Exception as exc:
@@ -174,7 +178,64 @@ class AuthPage(QWidget):
             return
         try:
             session = auth_client.register(name, email, password)
+            session = self._ensure_camera_named(session)
+            if not session:
+                return
             self._set_status("Account created.", ok=True)
             self.auth_success.emit(session)
         except Exception as exc:
             self._set_status(str(exc))
+
+    def _ensure_camera_named(self, session):
+        if not session.get("needs_camera_name"):
+            return session
+
+        token = session.get("token")
+        user = session.get("user") or {}
+        suggested = f"{user.get('name', '').strip()} Camera".strip()
+        if suggested == "Camera":
+            suggested = ""
+
+        dialog = QInputDialog(self)
+        dialog.setWindowTitle("Create Camera")
+        dialog.setLabelText("No camera found for this account.\nEnter a camera name:")
+        dialog.setTextValue(suggested)
+        dialog.setStyleSheet(
+            """
+            QInputDialog {
+                background-color: #0f172a;
+            }
+            QLabel {
+                color: #e2e8f0;
+            }
+            QLineEdit {
+                background-color: #f8fafc;
+                color: #0f172a;
+                border: 1px solid #cbd5e1;
+                border-radius: 6px;
+                padding: 6px 8px;
+            }
+            QPushButton {
+                background-color: #1d4ed8;
+                color: white;
+                border: 1px solid #1e40af;
+                border-radius: 6px;
+                padding: 6px 10px;
+                font-weight: 700;
+            }
+            QPushButton:hover {
+                background-color: #1e40af;
+            }
+            """
+        )
+        ok = dialog.exec_()
+        camera_name = dialog.textValue().strip()
+
+        if not ok:
+            self._set_status("Camera setup canceled. Please provide a camera name to continue.")
+            return None
+        if not camera_name:
+            self._set_status("Camera name is required.")
+            return None
+
+        return auth_client.complete_camera_setup(token, user, camera_name)

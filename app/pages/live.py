@@ -16,6 +16,7 @@ from PyQt5.QtWidgets import (
 
 from app.widgets.toggle import ToggleSwitch
 from app.services.auth_client import auth_client
+from app.services.recorder import ChunkRecorderService
 from core.ai_worker import AIWorker
 from core.identity_memory import IdentityMemory
 from config.settings import *
@@ -70,6 +71,7 @@ class LivePage(QWidget):
         self._session_invalid_emitted = False
         self._sync_in_progress = False
         self._applying_remote_state = False
+        self._recorder_service = ChunkRecorderService()
 
         root = QVBoxLayout()
         root.setContentsMargins(20, 20, 20, 20)
@@ -300,6 +302,20 @@ class LivePage(QWidget):
         finally:
             self._applying_remote_state = False
 
+    def _start_recorder_service(self):
+        try:
+            self._recorder_service.start()
+            self._log_activity("recorder:start", "Recorder chunk upload service started.", "feed:start")
+        except Exception as exc:
+            self._log_activity("recorder:start:error", f"Recorder start failed: {exc}", "feed:start")
+
+    def _stop_recorder_service(self):
+        try:
+            self._recorder_service.stop()
+        except Exception:
+            pass
+        self._log_activity("recorder:stop", "Recorder chunk upload service stopped.", "feed:stop")
+
     def _update_control_buttons(self):
         if self.feed_state == "inactive":
             self.stream_btn.setText("Start Feed")
@@ -437,6 +453,14 @@ class LivePage(QWidget):
     def update_frame(self):
         pass
 
+    def _on_raw_frame_ready(self, frame):
+        if self.feed_state != "active":
+            return
+        try:
+            self._recorder_service.add_frame(frame)
+        except Exception:
+            pass
+
     def update_ui(self, frame, person_count, faces, activity):
         if self.feed_state != "active":
             return
@@ -548,8 +572,10 @@ class LivePage(QWidget):
         self.feed_state = "active"
         self._reset_fps_metrics()
         self.worker = AIWorker(self._toggle_map())
+        self.worker.raw_frame_ready.connect(self._on_raw_frame_ready)
         self.worker.frame_ready.connect(self.update_ui)
         self.worker.start()
+        self._start_recorder_service()
         self.status.setText("AI: ACTIVE")
         self._update_control_buttons()
         self.worker_changed.emit(self.worker)
@@ -570,6 +596,7 @@ class LivePage(QWidget):
             return
         self.worker.stop()
         self.worker = None
+        self._stop_recorder_service()
         self.feed_state = "paused"
         self._reset_fps_metrics()
         self.status.setText("AI: PAUSED")
@@ -592,6 +619,7 @@ class LivePage(QWidget):
             self.worker.stop()
             self.worker = None
             self.worker_changed.emit(None)
+        self._stop_recorder_service()
         self.feed_state = "inactive"
         self.status.setText("AI: INACTIVE")
         self.people_label.setText("People: 0")
@@ -618,6 +646,7 @@ class LivePage(QWidget):
             self.worker.stop()
             self.worker = None
             self.worker_changed.emit(None)
+        self._stop_recorder_service()
         self.feed_state = "inactive"
         self.status.setText("AI: INACTIVE")
         self._update_control_buttons()

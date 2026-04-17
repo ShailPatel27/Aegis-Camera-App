@@ -66,7 +66,7 @@ ACTIVITY_LOG_COOLDOWNS = {
 # Recording / chunk upload pipeline
 RECORD_FPS = 10
 RECORD_CHUNK_SECONDS = 5
-FFMPEG_PATH = "./ffmpeg.exe"
+FFMPEG_PATH = "./bin/ffmpeg.exe"
 
 # Face recognition/event dedupe (used as we add identity features)
 IDENTITY_EVENT_COOLDOWN_SECONDS = 30

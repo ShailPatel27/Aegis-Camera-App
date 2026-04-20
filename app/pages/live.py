@@ -78,6 +78,19 @@ class LivePage(QWidget):
         self._recorder_service = ChunkRecorderService()
         self._toggle_sync_in_progress = set()
         self._ignore_remote_apply_until = 0.0
+        self._analytics_last_push = 0.0
+        self._analytics_push_interval_s = 5.0
+        self._analytics_last_sample_at = 0.0
+        self._analytics_sample_interval_s = 1.0
+        self._analytics_buffer = {
+            "total_detections": 0,
+            "people_detected": 0,
+            "unique_people_entries": 0,
+            "recognized_faces": 0,
+            "unknown_faces": 0,
+        }
+        self._analytics_recognized_names = set()
+        self._manual_stop_override = False
         camera_from_session = None
         if isinstance(self.session, dict) and isinstance(self.session.get("camera"), dict):
             camera_from_session = self.session.get("camera", {}).get("selected_camera")
@@ -410,6 +423,9 @@ class LivePage(QWidget):
             return
         if time.time() < self._ignore_remote_apply_until:
             return
+        if self._manual_stop_override and self.feed_state == "inactive":
+            self._update_control_buttons()
+            return
         self._applying_remote_state = True
         try:
             stream_enabled = self._is_remote_stream_enabled()
@@ -558,6 +574,7 @@ class LivePage(QWidget):
 
     def _on_stream_button_clicked(self):
         if self.feed_state == "inactive":
+            self._manual_stop_override = False
             self.start_worker(sync_remote=True)
         else:
             self.stop_inactive(sync_remote=True)
@@ -696,6 +713,7 @@ class LivePage(QWidget):
             self.fps_accumulator = 0
 
         self.people_label.setText(f"People: {person_count}")
+        self._accumulate_analytics(activity, person_count, faces)
         if self.intrusion.isChecked() and activity.get("person_count", 0) > 0:
             self._log_activity(
                 event_key="intrusion:person",
@@ -782,6 +800,71 @@ class LivePage(QWidget):
 
         self._render_frame_to_label(frame)
 
+    def _accumulate_analytics(self, activity, person_count, faces):
+        now = time.time()
+        if (now - self._analytics_last_sample_at) < self._analytics_sample_interval_s:
+            return
+        self._analytics_last_sample_at = now
+        try:
+            matched_faces = int(max(0, len(activity.get("matched_faces", []) or [])))
+            unknown_faces = int(
+                max(
+                    0,
+                    activity.get("unknown_faces", sum(1 for f in faces if not f.get("matched"))),
+                )
+            )
+            face_presence = matched_faces + unknown_faces
+            new_entries = int(max(0, activity.get("unique_person_entries", 0)))
+            people_detected = new_entries if new_entries > 0 else int(max(0, person_count, face_presence))
+            detection_count = int(max(0, activity.get("detection_count", 0)))
+
+            self._analytics_buffer["total_detections"] += detection_count
+            # Count people as entries over time, not sustained per-second presence.
+            self._analytics_buffer["people_detected"] += int(max(0, new_entries))
+            self._analytics_buffer["unique_people_entries"] += int(max(
+                max(0, activity.get("unique_person_entries", people_detected))
+            , 0))
+            for name in (activity.get("matched_faces", []) or []):
+                if name:
+                    self._analytics_recognized_names.add(str(name))
+            self._analytics_buffer["recognized_faces"] = len(self._analytics_recognized_names)
+            self._analytics_buffer["unknown_faces"] += unknown_faces
+        except Exception:
+            return
+
+        if (now - self._analytics_last_push) < self._analytics_push_interval_s:
+            return
+        self._analytics_last_push = now
+        self._push_analytics_async()
+
+    def _push_analytics_async(self):
+        payload = dict(self._analytics_buffer)
+        if not any(int(v) > 0 for v in payload.values()):
+            return
+
+        for key in self._analytics_buffer.keys():
+            self._analytics_buffer[key] = 0
+        self._analytics_recognized_names.clear()
+
+        session_snapshot = self.session if isinstance(self.session, dict) else auth_client.load_session()
+        if not isinstance(session_snapshot, dict):
+            return
+
+        def _worker():
+            try:
+                auth_client.ingest_analytics(
+                    session=session_snapshot,
+                    total_detections=int(payload.get("total_detections", 0)),
+                    people_detected=int(payload.get("people_detected", 0)),
+                    unique_people_entries=int(payload.get("unique_people_entries", 0)),
+                    recognized_faces=int(payload.get("recognized_faces", 0)),
+                    unknown_faces=int(payload.get("unknown_faces", 0)),
+                )
+            except Exception:
+                pass
+
+        threading.Thread(target=_worker, daemon=True).start()
+
     def _toggle_map(self):
         return {
             "intrusion": self.intrusion.isChecked,
@@ -844,6 +927,7 @@ class LivePage(QWidget):
         self._update_control_buttons()
         self._log_activity("feed:stop", "Feed stopped (camera inactive)", "feed:stop")
         if sync_remote:
+            self._manual_stop_override = True
             self._ignore_remote_apply_until = time.time() + 4.0
             self._apply_remote_state_async(False, False)
 
@@ -939,6 +1023,14 @@ class LivePage(QWidget):
             message=f"User detected: {user_id}{confidence_text}",
             cooldown_key="identity",
             now=now,
+        )
+        # Face recognition alerts should include screenshot for recent face alerts UI.
+        self._push_alert_async(
+            alert_type="face_detected",
+            message=f"User detected: {user_id}{confidence_text}",
+            confidence=confidence,
+            face_name=user_id,
+            frame=frame,
         )
         if str(role or "user").lower() == "blacklist":
             self._push_alert_async(

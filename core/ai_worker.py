@@ -64,6 +64,8 @@ class AIWorker(QThread):
         self._confirmed_face_streaks = {}
         self._loiter_tracks = {}
         self._next_loiter_track_id = 1
+        self._person_tracks = {}
+        self._next_person_track_id = 1
 
     @staticmethod
     def _iou(box_a, box_b):
@@ -205,6 +207,7 @@ class AIWorker(QThread):
                 self._previous_raw_detections = []
                 self._confirmed_streaks = {}
                 self._loiter_tracks = {}
+                self._person_tracks = {}
 
             run_face = FACE_RECOGNITION_ENABLED and (
                 self.toggles.get("face_recognition") is None
@@ -282,13 +285,16 @@ class AIWorker(QThread):
                 )
 
             loiter_count = 0
+            unique_person_entries = 0
+            person_boxes = [
+                tuple(map(int, det["box"]))
+                for det in detections
+                if det["class_name"] == "person"
+            ]
+            if run_yolo and should_run_yolo:
+                unique_person_entries = self._update_person_tracks(person_boxes, now=time.time())
             if self.toggles["loiter"]():
                 now = time.time()
-                person_boxes = [
-                    tuple(map(int, det["box"]))
-                    for det in detections
-                    if det["class_name"] == "person"
-                ]
                 loitering_boxes = self._update_loiter_tracks(person_boxes, now)
                 loiter_count = len(loitering_boxes)
 
@@ -372,14 +378,27 @@ class AIWorker(QThread):
                 if d["class_name"] in THREAT_CLASS_NAMES and float(d.get("confidence", 0.0)) >= THREAT_MIN_CONFIDENCE
             )
             matched_faces = [f["name"] for f in faces if f.get("matched") and f.get("name")]
+            unknown_face_count = sum(1 for f in faces if not f.get("matched"))
             activity = {
                 "person_count": person_count,
+                # Event-like detection count (avoid per-frame inflation for static scenes).
+                "detection_count": (
+                    int(max(0, unique_person_entries))
+                    + int(max(0, motion_count))
+                    + int(max(0, vehicle_count))
+                    + int(max(0, threat_count))
+                    + int(max(0, loiter_count))
+                    + (1 if person_count >= CROWD_THRESHOLD else 0)
+                    + (1 if emergency_triggered else 0)
+                ),
+                "unique_person_entries": unique_person_entries,
                 "crowd_triggered": person_count >= CROWD_THRESHOLD,
                 "vehicle_count": vehicle_count,
                 "threat_count": threat_count,
                 "motion_count": motion_count,
                 "loiter_count": loiter_count,
                 "matched_faces": matched_faces,
+                "unknown_faces": unknown_face_count,
                 "emergency_progress": emergency_progress,
                 "emergency_total": emergency_total,
                 "emergency_remaining_reset_s": emergency_remaining,
@@ -459,3 +478,42 @@ class AIWorker(QThread):
             self._loiter_tracks.pop(track_id, None)
 
         return loitering_boxes
+
+    def _update_person_tracks(self, person_boxes, now):
+        matched_track_ids = set()
+        new_entries = 0
+
+        for box in person_boxes:
+            best_track_id = None
+            best_iou = 0.0
+            for track_id, track in self._person_tracks.items():
+                iou = self._iou(box, track["box"])
+                if iou > best_iou:
+                    best_iou = iou
+                    best_track_id = track_id
+
+            if best_track_id is not None and best_iou >= LOITER_MATCH_IOU:
+                track = self._person_tracks[best_track_id]
+                track["box"] = box
+                track["last_seen"] = now
+                matched_track_ids.add(best_track_id)
+            else:
+                track_id = self._next_person_track_id
+                self._next_person_track_id += 1
+                self._person_tracks[track_id] = {
+                    "box": box,
+                    "first_seen": now,
+                    "last_seen": now,
+                }
+                matched_track_ids.add(track_id)
+                new_entries += 1
+
+        stale_ids = []
+        for track_id, track in self._person_tracks.items():
+            if now - track["last_seen"] > LOITER_TRACK_STALE_SECONDS:
+                stale_ids.append(track_id)
+
+        for track_id in stale_ids:
+            self._person_tracks.pop(track_id, None)
+
+        return new_entries

@@ -1,10 +1,11 @@
 import cv2
 import time
 import re
+import threading
 from datetime import datetime
 from pathlib import Path
 
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtWidgets import (
     QWidget,
@@ -19,6 +20,7 @@ from PyQt5.QtWidgets import (
 from config.settings import (
     ACTIVITY_LOG_COOLDOWNS,
     ACTIVITY_LOG_DEFAULT_COOLDOWN_SECONDS,
+    FACE_PREVIEW_INTERVAL_MS,
     FACE_PRIMARY_HOLD_FRAMES,
     FACE_PRIMARY_MATCH_IOU,
     FACE_PRIMARY_MIN_RELATIVE_AREA,
@@ -31,6 +33,8 @@ from app.services.auth_client import auth_client
 
 
 class RegisterPage(QWidget):
+    sync_result = pyqtSignal(dict)
+
     def __init__(self, logger=None):
         super().__init__()
         self.face_engine = FaceEngine()
@@ -45,6 +49,12 @@ class RegisterPage(QWidget):
         self.primary_match_score = 0.0
         self.pending_embeddings = []
         self.pending_face_crop = None
+        self._save_in_progress = False
+        self._last_preview_ts = 0.0
+        self._last_match_ts = 0.0
+        # Keep register preview lighter than live stream to avoid UI lockups.
+        self._preview_interval_s = max(0.10, float(FACE_PREVIEW_INTERVAL_MS) / 1000.0)
+        self._match_interval_s = max(0.30, self._preview_interval_s * 2.0)
         self.setStyleSheet(
             """
             QLineEdit {
@@ -91,6 +101,7 @@ class RegisterPage(QWidget):
         root.setContentsMargins(20, 20, 20, 20)
         root.setSpacing(12)
         self.setLayout(root)
+        self.sync_result.connect(self._on_sync_result)
 
         title = QLabel("Face Registration")
         title.setStyleSheet("font-size: 18px; font-weight: 600;")
@@ -238,18 +249,28 @@ class RegisterPage(QWidget):
         return chosen
 
     def on_live_frame(self, frame):
+        now = time.time()
+        # Throttle heavy face processing/rendering on UI thread.
+        if (now - self._last_preview_ts) < self._preview_interval_s:
+            return
+        self._last_preview_ts = now
+
         self.current_frame = frame.copy()
 
         faces = list(self.face_engine.detect_faces(self.current_frame))
         self.current_faces = faces
         primary = self._select_primary_face(faces)
-        self.primary_match_name = None
-        self.primary_match_score = 0.0
-        if primary is not None:
-            emb = self.face_engine.build_embedding(self.current_frame, primary)
-            match_name, match_score = self.face_engine.identify_embedding(emb)
-            self.primary_match_name = match_name
-            self.primary_match_score = match_score
+        # Matching is more expensive than detect; run less often.
+        should_refresh_match = (now - self._last_match_ts) >= self._match_interval_s
+        if should_refresh_match:
+            self._last_match_ts = now
+            self.primary_match_name = None
+            self.primary_match_score = 0.0
+            if primary is not None:
+                emb = self.face_engine.build_embedding(self.current_frame, primary)
+                match_name, match_score = self.face_engine.identify_embedding(emb)
+                self.primary_match_name = match_name
+                self.primary_match_score = match_score
 
         display = self.current_frame.copy()
         for face in faces:
@@ -353,6 +374,9 @@ class RegisterPage(QWidget):
         return str(out_path)
 
     def save_user(self):
+        if self._save_in_progress:
+            self.set_status("Save already in progress. Please wait...")
+            return
         name = self.name_input.text()
         if len(self.pending_embeddings) < FACE_REGISTER_SAMPLES_REQUIRED:
             self.set_status(
@@ -373,30 +397,64 @@ class RegisterPage(QWidget):
             self.set_status(str(exc))
             return
 
-        # Sync to shared monitor DB so face entries appear in web monitor too.
-        sync_note = ""
-        try:
-            session = auth_client.load_session()
-            centroid = None
-            if saved_name in self.face_engine.registry:
-                centroid = self.face_engine.registry[saved_name].get("centroid")
-            if session and centroid is not None:
-                image_url = auth_client.upload_face_image(session, saved_name, self.pending_face_crop)
-                auth_client.sync_face_profile(session, saved_name, centroid, role=role, image_url=image_url)
-                if saved_name in self.face_engine.registry and isinstance(self.face_engine.registry[saved_name], dict):
-                    self.face_engine.registry[saved_name]["image_url"] = image_url
-                    self.face_engine._save_registry()
-                sync_note = " | synced to monitor"
-        except Exception as exc:
-            sync_note = f" | sync failed: {exc}"
+        self._save_in_progress = True
+        self.save_btn.setEnabled(False)
+
+        # Snapshot for async sync before we clear UI buffers.
+        face_crop = self.pending_face_crop.copy() if self.pending_face_crop is not None else None
+        centroid = None
+        if saved_name in self.face_engine.registry:
+            centroid = self.face_engine.registry[saved_name].get("centroid")
 
         self.pending_embeddings = []
         self.pending_face_crop = None
         self.samples_label.setText(self._sample_text())
         self.name_input.setText("")
         self.refresh_users()
-        self.set_status(f"User saved: {saved_name}{sync_note}")
+        self.set_status(f"User saved: {saved_name} | syncing to monitor...")
         self._log_activity(f"register:save:{saved_name}", f"User registered: {saved_name}", "register:save")
+
+        threading.Thread(
+            target=self._sync_face_profile_worker,
+            args=(saved_name, role, centroid, face_crop),
+            daemon=True,
+        ).start()
+
+    def _sync_face_profile_worker(self, saved_name, role, centroid, face_crop):
+        result = {"saved_name": saved_name, "ok": False, "message": ""}
+        try:
+            session = auth_client.load_session()
+            if session and centroid is not None:
+                image_url = auth_client.upload_face_image(session, saved_name, face_crop)
+                auth_client.sync_face_profile(
+                    session,
+                    saved_name,
+                    centroid,
+                    role=role,
+                    image_url=image_url,
+                )
+                if (
+                    saved_name in self.face_engine.registry
+                    and isinstance(self.face_engine.registry[saved_name], dict)
+                ):
+                    self.face_engine.registry[saved_name]["image_url"] = image_url
+                    self.face_engine._save_registry()
+                result["ok"] = True
+                result["message"] = "synced to monitor"
+            else:
+                result["message"] = "local save only"
+        except Exception as exc:
+            result["message"] = f"sync failed: {exc}"
+        self.sync_result.emit(result)
+
+    def _on_sync_result(self, payload):
+        self._save_in_progress = False
+        self.save_btn.setEnabled(True)
+        if not isinstance(payload, dict):
+            return
+        name = payload.get("saved_name") or "user"
+        msg = payload.get("message") or ""
+        self.set_status(f"User saved: {name} | {msg}")
 
     def delete_selected_user(self):
         item = self.user_list.currentItem()

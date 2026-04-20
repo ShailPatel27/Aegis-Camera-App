@@ -705,6 +705,54 @@ class AuthClient:
             raise ValueError(detail or f"Failed to create alert (HTTP {response.status_code})")
         return response.json()
 
+    def ingest_analytics(
+        self,
+        session: Dict,
+        total_detections: int = 0,
+        people_detected: int = 0,
+        unique_people_entries: int = 0,
+        recognized_faces: int = 0,
+        unknown_faces: int = 0,
+        timestamp_iso: Optional[str] = None,
+    ) -> Dict:
+        if not isinstance(session, dict):
+            raise ValueError("Missing session")
+
+        token = session.get("token")
+        camera = session.get("camera") if isinstance(session.get("camera"), dict) else {}
+        camera_id = camera.get("id")
+        if not token or not camera_id:
+            raise ValueError("Missing authenticated camera session")
+
+        payload = {
+            "camera_id": camera_id,
+            "total_detections": int(max(0, total_detections)),
+            "people_detected": int(max(0, people_detected)),
+            "unique_people_entries": int(max(0, unique_people_entries)),
+            "recognized_faces": int(max(0, recognized_faces)),
+            "unknown_faces": int(max(0, unknown_faces)),
+            "timestamp": timestamp_iso,
+        }
+
+        response = self._request_with_port_fallback(
+            "POST",
+            "/api/v1/monitor/analytics/ingest",
+            headers={**self._auth_headers(token), "Content-Type": "application/json"},
+            json=payload,
+            timeout=20,
+        )
+        if response.status_code in (401, 403):
+            raise PermissionError("Session expired")
+        if not response.ok:
+            detail = None
+            try:
+                err = response.json()
+                detail = err.get("detail") or err.get("message")
+            except Exception:
+                detail = response.text.strip() or None
+            raise ValueError(detail or f"Failed to ingest analytics (HTTP {response.status_code})")
+        return response.json()
+
     def sync_face_profile(self, session: Dict, name: str, embedding, role: str = "user", image_url: Optional[str] = None) -> Dict:
         if not isinstance(session, dict):
             raise ValueError("Missing session")

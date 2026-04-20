@@ -268,6 +268,22 @@ class AuthClient:
             raise ValueError("Invalid user payload from backend")
         return payload
 
+    def _refresh_token(self, token: str) -> Optional[str]:
+        response = self._request_with_port_fallback(
+            "POST",
+            "/api/v1/auth/refresh",
+            headers=self._auth_headers(token),
+            timeout=20,
+        )
+        if not response.ok:
+            return None
+        payload = response.json()
+        if isinstance(payload, dict):
+            next_token = payload.get("token")
+            if isinstance(next_token, str) and next_token:
+                return next_token
+        return None
+
     def refresh_session(self, session: Dict) -> Dict:
         if not isinstance(session, dict):
             raise ValueError("Missing session")
@@ -275,10 +291,19 @@ class AuthClient:
         if not token:
             raise ValueError("Missing session token")
 
-        user = self.get_current_user(token)
-        camera = self._get_existing_camera(token) or {}
-        self._save_session(token, user, camera)
-        return {"token": token, "user": user, "camera": camera}
+        active_token = token
+        try:
+            user = self.get_current_user(active_token)
+        except PermissionError:
+            refreshed = self._refresh_token(active_token)
+            if not refreshed:
+                raise
+            active_token = refreshed
+            user = self.get_current_user(active_token)
+
+        camera = self._get_existing_camera(active_token) or {}
+        self._save_session(active_token, user, camera)
+        return {"token": active_token, "user": user, "camera": camera}
 
     def sync_faces_registry(self, session: Dict) -> Dict[str, Dict]:
         if not isinstance(session, dict):
@@ -411,6 +436,44 @@ class AuthClient:
             return None
         self._save_session(token, session.get("user", {}), latest)
         return latest
+
+    def update_selected_camera(self, session: Dict, selected_camera: int) -> Dict:
+        if not isinstance(session, dict):
+            raise ValueError("Missing session")
+
+        token = session.get("token")
+        user = dict(session.get("user", {}))
+        camera = dict(session.get("camera", {}))
+        camera_id = camera.get("id")
+        if not token or not camera_id:
+            raise ValueError("Missing authenticated camera session")
+
+        selected = int(selected_camera)
+        payload = {
+            "selected_camera": selected,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+        if self.supabase and user.get("id"):
+            supa_response = (
+                self.supabase.table("cameras")
+                .update(payload)
+                .eq("id", camera_id)
+                .eq("user_id", user.get("id"))
+                .execute()
+            )
+            rows = supa_response.data if isinstance(supa_response.data, list) else []
+            if rows:
+                camera = self._merge_camera_with_defaults(rows[0])
+            else:
+                camera["selected_camera"] = selected
+                camera = self._merge_camera_with_defaults(camera)
+        else:
+            camera["selected_camera"] = selected
+            camera = self._merge_camera_with_defaults(camera)
+
+        self._save_session(token, user, camera)
+        return camera
 
     def update_ai_toggle(self, session: Dict, toggle_key: str, enabled: bool) -> Dict:
         valid_keys = self._ai_toggle_defaults().keys()

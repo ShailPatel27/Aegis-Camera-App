@@ -12,6 +12,7 @@ from PyQt5.QtWidgets import (
     QHBoxLayout,
     QPushButton,
     QGridLayout,
+    QComboBox,
 )
 
 from app.widgets.toggle import ToggleSwitch
@@ -76,6 +77,16 @@ class LivePage(QWidget):
         self._recorder_starting = False
         self._recorder_service = ChunkRecorderService()
         self._toggle_sync_in_progress = set()
+        self._ignore_remote_apply_until = 0.0
+        camera_from_session = None
+        if isinstance(self.session, dict) and isinstance(self.session.get("camera"), dict):
+            camera_from_session = self.session.get("camera", {}).get("selected_camera")
+        try:
+            self.selected_camera_index = int(
+                CAMERA_INDEX if camera_from_session is None else camera_from_session
+            )
+        except (TypeError, ValueError):
+            self.selected_camera_index = int(CAMERA_INDEX)
 
         root = QVBoxLayout()
         root.setContentsMargins(20, 20, 20, 20)
@@ -89,8 +100,19 @@ class LivePage(QWidget):
         self.fps_label.setStyleSheet("color: #94a3b8;")
         self.people_label = QLabel("People: 0")
         self.people_label.setStyleSheet("color: #94a3b8;")
+        self.camera_selector = QComboBox()
+        self.camera_selector.setFocusPolicy(Qt.NoFocus)
+        self.camera_selector.setStyleSheet(
+            "QComboBox { background-color: #1e293b; color: #e2e8f0; border: 1px solid #334155; border-radius: 8px; padding: 6px 10px; min-width: 130px; }"
+            "QComboBox::drop-down { border: none; }"
+            "QComboBox QAbstractItemView { background-color: #0f172a; color: #e2e8f0; selection-background-color: #1d4ed8; }"
+        )
+        self._populate_camera_selector()
+        self.camera_selector.currentIndexChanged.connect(self._on_camera_selection_changed)
         top_bar.addWidget(self.status)
         top_bar.addStretch()
+        top_bar.addWidget(QLabel("Camera:"))
+        top_bar.addWidget(self.camera_selector)
         top_bar.addWidget(self.people_label)
         top_bar.addWidget(self.fps_label)
         root.addLayout(top_bar)
@@ -207,6 +229,107 @@ class LivePage(QWidget):
         )
         toggle.toggled.connect(lambda checked, toggle_key=key: self._persist_toggle_change(toggle_key, checked))
 
+    def _discover_camera_indices(self, max_index=8):
+        discovered = []
+        for idx in range(max_index + 1):
+            cap = cv2.VideoCapture(idx)
+            try:
+                if cap is None or not cap.isOpened():
+                    continue
+                ok, _ = cap.read()
+                if ok:
+                    discovered.append(idx)
+            except Exception:
+                continue
+            finally:
+                try:
+                    cap.release()
+                except Exception:
+                    pass
+
+        if not discovered:
+            return [self.selected_camera_index]
+
+        if self.selected_camera_index not in discovered:
+            discovered.append(self.selected_camera_index)
+        return sorted(set(discovered))
+
+    def _populate_camera_selector(self):
+        options = self._discover_camera_indices()
+        self.camera_selector.blockSignals(True)
+        self.camera_selector.clear()
+        for idx in options:
+            self.camera_selector.addItem(f"Camera {idx}", idx)
+        selected_pos = self.camera_selector.findData(self.selected_camera_index)
+        if selected_pos >= 0:
+            self.camera_selector.setCurrentIndex(selected_pos)
+        self.camera_selector.blockSignals(False)
+
+    def _restart_worker_for_selected_camera(self):
+        if self.worker is None:
+            return
+
+        self.worker.stop()
+        self.worker = None
+        self.worker_changed.emit(None)
+        self._stop_recorder_service()
+        self._reset_fps_metrics()
+
+        self.worker = AIWorker(self._toggle_map(), camera_index=self.selected_camera_index)
+        self.worker.raw_frame_ready.connect(self._on_raw_frame_ready)
+        self.worker.frame_ready.connect(self.update_ui)
+        self.worker.start()
+        self._start_recorder_service()
+        self.status.setText("AI: ACTIVE")
+        self.worker_changed.emit(self.worker)
+
+    def _persist_selected_camera_async(self, selected_camera: int):
+        if not isinstance(self.session, dict):
+            self.session = auth_client.load_session()
+        if not isinstance(self.session, dict):
+            return
+
+        snapshot = dict(self.session)
+
+        def _worker():
+            try:
+                updated = auth_client.update_selected_camera(snapshot, selected_camera)
+                if isinstance(updated, dict) and isinstance(self.session, dict):
+                    self.session["camera"] = updated
+            except Exception as exc:
+                self._log_activity(
+                    event_key="camera:select:sync_error",
+                    message=f"Failed to sync selected camera: {exc}",
+                    cooldown_key="toggle",
+                )
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_camera_selection_changed(self, _):
+        selected = self.camera_selector.currentData()
+        try:
+            next_index = int(selected)
+        except (TypeError, ValueError):
+            return
+
+        if next_index == self.selected_camera_index:
+            return
+
+        self.selected_camera_index = next_index
+        self._log_activity(
+            event_key=f"camera:select:{next_index}",
+            message=f"Switched to camera {next_index}",
+            cooldown_key="toggle",
+        )
+
+        if isinstance(self.session, dict) and isinstance(self.session.get("camera"), dict):
+            self.session["camera"]["selected_camera"] = next_index
+
+        if self.feed_state == "active":
+            self._restart_worker_for_selected_camera()
+
+        self._persist_selected_camera_async(next_index)
+
     def _refresh_toggles_from_db(self):
         session = self.session if isinstance(self.session, dict) else auth_client.load_session()
         if not isinstance(session, dict):
@@ -284,6 +407,8 @@ class LivePage(QWidget):
 
     def _apply_remote_stream_state(self):
         if self._applying_remote_state:
+            return
+        if time.time() < self._ignore_remote_apply_until:
             return
         self._applying_remote_state = True
         try:
@@ -676,7 +801,7 @@ class LivePage(QWidget):
         self._refresh_toggles_from_db()
         self.feed_state = "active"
         self._reset_fps_metrics()
-        self.worker = AIWorker(self._toggle_map())
+        self.worker = AIWorker(self._toggle_map(), camera_index=self.selected_camera_index)
         self.worker.raw_frame_ready.connect(self._on_raw_frame_ready)
         self.worker.frame_ready.connect(self.update_ui)
         self.worker.start()
@@ -686,6 +811,7 @@ class LivePage(QWidget):
         self.worker_changed.emit(self.worker)
         self._log_activity("feed:start", "Feed started", "feed:start")
         if sync_remote:
+            self._ignore_remote_apply_until = time.time() + 4.0
             self._apply_remote_state_async(True, False)
 
     def pause_worker(self, sync_remote=True):
@@ -701,6 +827,7 @@ class LivePage(QWidget):
         self.worker_changed.emit(None)
         self._log_activity("feed:pause", "Feed paused", "feed:pause")
         if sync_remote:
+            self._ignore_remote_apply_until = time.time() + 4.0
             self._apply_remote_state_async(True, True)
 
     def stop_inactive(self, sync_remote=True):
@@ -717,6 +844,7 @@ class LivePage(QWidget):
         self._update_control_buttons()
         self._log_activity("feed:stop", "Feed stopped (camera inactive)", "feed:stop")
         if sync_remote:
+            self._ignore_remote_apply_until = time.time() + 4.0
             self._apply_remote_state_async(False, False)
 
     def stop_worker(self):
@@ -759,7 +887,7 @@ class LivePage(QWidget):
             return "motion"
         if event_key.startswith("loiter:"):
             return "loiter"
-        if event_key.startswith("emergency:"):
+        if event_key == "emergency:triggered":
             return "emergency"
         return None
 

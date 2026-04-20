@@ -37,12 +37,12 @@ class AIWorker(QThread):
     frame_ready = pyqtSignal(object, int, object, object)
     raw_frame_ready = pyqtSignal(object)
 
-    def __init__(self, toggles):
+    def __init__(self, toggles, camera_index=None):
         super().__init__()
         self.running = True
         self._emergency_flash_until = 0.0
 
-        self.camera = Camera()
+        self.camera = Camera(camera_index=camera_index)
         self.detector = Detector()
         self.motion = MotionDetector()
         self.face_engine = FaceEngine()

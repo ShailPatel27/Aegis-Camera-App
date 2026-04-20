@@ -1,5 +1,8 @@
 import cv2
 import time
+import re
+from datetime import datetime
+from pathlib import Path
 
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QImage, QPixmap
@@ -21,6 +24,7 @@ from config.settings import (
     FACE_PRIMARY_MIN_RELATIVE_AREA,
     FACE_REGISTER_SAMPLES_REQUIRED,
     FACE_RECOGNITION_UNKNOWN_LABEL,
+    FACE_USERS_DIR,
 )
 from core.face_engine import FaceEngine
 from app.services.auth_client import auth_client
@@ -40,6 +44,7 @@ class RegisterPage(QWidget):
         self.primary_match_name = None
         self.primary_match_score = 0.0
         self.pending_embeddings = []
+        self.pending_face_crop = None
         self.setStyleSheet(
             """
             QLineEdit {
@@ -115,6 +120,7 @@ class RegisterPage(QWidget):
         self.save_btn.clicked.connect(self.save_user)
         row1.addWidget(self.save_btn, 1)
 
+
         row2 = QHBoxLayout()
         row2.setSpacing(8)
         root.addLayout(row2)
@@ -177,7 +183,10 @@ class RegisterPage(QWidget):
         self.face_engine.registry = self.face_engine._load_registry()
         self.user_list.clear()
         for user in self.face_engine.list_users():
-            self.user_list.addItem(user)
+            profile = self.face_engine.registry.get(user, {}) if isinstance(self.face_engine.registry.get(user), dict) else {}
+            role = str(profile.get("role") or "user").lower()
+            label = f"{user} [BLACKLIST]" if role == "blacklist" else user
+            self.user_list.addItem(label)
 
     def set_live_worker(self, worker):
         if self.live_worker is not None:
@@ -312,6 +321,9 @@ class RegisterPage(QWidget):
         if emb is None:
             self.set_status("Could not build face sample. Try again.")
             return
+        x, y, w, h = self.primary_face
+        crop = self.current_frame[max(0, y):max(0, y) + max(1, h), max(0, x):max(0, x) + max(1, w)]
+        self.pending_face_crop = crop.copy() if crop.size > 0 else None
 
         self.pending_embeddings.append(emb)
         self.samples_label.setText(self._sample_text())
@@ -320,9 +332,25 @@ class RegisterPage(QWidget):
 
     def clear_samples(self):
         self.pending_embeddings = []
+        self.pending_face_crop = None
         self.samples_label.setText(self._sample_text())
         self.set_status("Captured samples cleared.")
         self._log_activity("register:sample:clear", "Captured face samples cleared", "register:sample")
+
+    @staticmethod
+    def _safe_name(name: str) -> str:
+        clean = re.sub(r"[^a-zA-Z0-9_-]+", "_", (name or "").strip())
+        return clean.strip("_") or "user"
+
+    def _save_user_image_local(self, name: str):
+        if self.pending_face_crop is None or self.pending_face_crop.size == 0:
+            return None
+        out_dir = Path(FACE_USERS_DIR)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        fname = f"{self._safe_name(name)}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
+        out_path = out_dir / fname
+        cv2.imwrite(str(out_path), self.pending_face_crop)
+        return str(out_path)
 
     def save_user(self):
         name = self.name_input.text()
@@ -332,8 +360,15 @@ class RegisterPage(QWidget):
             )
             return
 
+        role = "user"
+        local_image_path = self._save_user_image_local(name)
         try:
-            saved_name = self.face_engine.register_user(name, self.pending_embeddings)
+            saved_name = self.face_engine.register_user(
+                name,
+                self.pending_embeddings,
+                role=role,
+                image_path=local_image_path,
+            )
         except ValueError as exc:
             self.set_status(str(exc))
             return
@@ -346,12 +381,17 @@ class RegisterPage(QWidget):
             if saved_name in self.face_engine.registry:
                 centroid = self.face_engine.registry[saved_name].get("centroid")
             if session and centroid is not None:
-                auth_client.sync_face_profile(session, saved_name, centroid)
+                image_url = auth_client.upload_face_image(session, saved_name, self.pending_face_crop)
+                auth_client.sync_face_profile(session, saved_name, centroid, role=role, image_url=image_url)
+                if saved_name in self.face_engine.registry and isinstance(self.face_engine.registry[saved_name], dict):
+                    self.face_engine.registry[saved_name]["image_url"] = image_url
+                    self.face_engine._save_registry()
                 sync_note = " | synced to monitor"
         except Exception as exc:
             sync_note = f" | sync failed: {exc}"
 
         self.pending_embeddings = []
+        self.pending_face_crop = None
         self.samples_label.setText(self._sample_text())
         self.name_input.setText("")
         self.refresh_users()
@@ -364,7 +404,8 @@ class RegisterPage(QWidget):
             self.set_status("Select a user to delete.")
             return
 
-        name = item.text().strip()
+        display_name = item.text().strip()
+        name = display_name.replace(" [BLACKLIST]", "").strip()
         if not name or name == FACE_RECOGNITION_UNKNOWN_LABEL:
             self.set_status("Invalid user selected.")
             return

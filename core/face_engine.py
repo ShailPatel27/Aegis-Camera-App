@@ -165,7 +165,7 @@ class FaceEngine:
             return None
         return (vec / norm).tolist()
 
-    def register_user(self, name, embeddings):
+    def register_user(self, name, embeddings, role="user", image_path=None, image_url=None):
         clean_name = self._sanitize_name(name)
         if not clean_name:
             raise ValueError("Name cannot be empty.")
@@ -205,6 +205,9 @@ class FaceEngine:
         self.registry[key_name] = {
             "centroid": centroid,
             "samples": len(embeddings),
+            "role": str(role or "user"),
+            "image_path": image_path,
+            "image_url": image_url,
         }
         self._save_registry()
         return key_name
@@ -220,12 +223,20 @@ class FaceEngine:
 
             best_name, best_score = self.identify_embedding(emb, FACE_RECOGNITION_THRESHOLD)
             is_match = best_name is not None
+            role = "user"
+            image_url = None
+            if is_match:
+                profile = self.registry.get(best_name, {}) if isinstance(self.registry.get(best_name), dict) else {}
+                role = str(profile.get("role") or "user")
+                image_url = profile.get("image_url")
             results.append(
                 {
                     "box": (int(x), int(y), int(x + w), int(y + h)),
                     "name": best_name if is_match else None,
                     "score": float(best_score),
                     "matched": bool(is_match),
+                    "role": role if is_match else None,
+                    "image_url": image_url if is_match else None,
                 }
             )
         return results

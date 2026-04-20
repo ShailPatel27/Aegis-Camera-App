@@ -75,6 +75,7 @@ class LivePage(QWidget):
         self._remote_state_update_in_progress = False
         self._recorder_starting = False
         self._recorder_service = ChunkRecorderService()
+        self._toggle_sync_in_progress = set()
 
         root = QVBoxLayout()
         root.setContentsMargins(20, 20, 20, 20)
@@ -234,6 +235,10 @@ class LivePage(QWidget):
     def _run_session_sync_worker(self, session_snapshot):
         try:
             refreshed = auth_client.refresh_session(session_snapshot)
+            try:
+                auth_client.sync_faces_registry(refreshed)
+            except Exception:
+                pass
             self.session_sync_result.emit({"status": "ok", "session": refreshed})
         except PermissionError as exc:
             self.session_sync_result.emit({"status": "invalid", "reason": str(exc)})
@@ -452,19 +457,39 @@ class LivePage(QWidget):
         if not isinstance(self.session, dict):
             return
 
-        try:
-            updated_camera = auth_client.update_ai_toggle(self.session, toggle_key, enabled)
-            if isinstance(updated_camera, dict):
-                self.session["camera"] = updated_camera
-        except PermissionError as exc:
-            self._emit_session_invalid(str(exc))
-        except Exception as exc:
-            # Keep UI responsive, but surface sync failures for troubleshooting.
-            self._log_activity(
-                event_key=f"toggle:{toggle_key}:sync_error",
-                message=f"Failed to sync {toggle_key} toggle: {exc}",
-                cooldown_key="toggle",
-            )
+        # Local-first: update UI/runtime state immediately, then sync remote asynchronously.
+        if isinstance(self.session.get("camera"), dict):
+            camera = dict(self.session.get("camera") or {})
+            config = dict(camera.get("config") or {})
+            ai_toggles = dict(config.get("ai_toggles") or {})
+            ai_toggles[toggle_key] = bool(enabled)
+            config["ai_toggles"] = ai_toggles
+            camera["config"] = config
+            self.session["camera"] = camera
+
+        if toggle_key in self._toggle_sync_in_progress:
+            return
+        self._toggle_sync_in_progress.add(toggle_key)
+
+        snapshot = dict(self.session)
+
+        def _worker():
+            try:
+                updated_camera = auth_client.update_ai_toggle(snapshot, toggle_key, enabled)
+                if isinstance(updated_camera, dict) and isinstance(self.session, dict):
+                    self.session["camera"] = updated_camera
+            except PermissionError as exc:
+                self._emit_session_invalid(str(exc))
+            except Exception as exc:
+                self._log_activity(
+                    event_key=f"toggle:{toggle_key}:sync_error",
+                    message=f"Failed to sync {toggle_key} toggle: {exc}",
+                    cooldown_key="toggle",
+                )
+            finally:
+                self._toggle_sync_in_progress.discard(toggle_key)
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     def _reset_fps_metrics(self):
         self.prev_time = time.time()
@@ -552,6 +577,7 @@ class LivePage(QWidget):
                 message=f"Person detected ({activity['person_count']})",
                 cooldown_key="intrusion",
                 now=current_time,
+                frame=frame,
             )
 
         if self.crowd.isChecked() and activity.get("crowd_triggered"):
@@ -560,6 +586,7 @@ class LivePage(QWidget):
                 message=f"Crowd threshold reached ({activity['person_count']})",
                 cooldown_key="crowd",
                 now=current_time,
+                frame=frame,
             )
 
         if self.vehicle.isChecked() and activity.get("vehicle_count", 0) > 0:
@@ -568,6 +595,7 @@ class LivePage(QWidget):
                 message=f"Vehicle detected ({activity['vehicle_count']})",
                 cooldown_key="vehicle",
                 now=current_time,
+                frame=frame,
             )
 
         if self.threat.isChecked() and activity.get("threat_count", 0) > 0:
@@ -576,6 +604,7 @@ class LivePage(QWidget):
                 message=f"Threat object detected ({activity['threat_count']})",
                 cooldown_key="threat",
                 now=current_time,
+                frame=frame,
             )
 
         if self.motion.isChecked() and activity.get("motion_count", 0) > 0:
@@ -584,6 +613,7 @@ class LivePage(QWidget):
                 message=f"Motion detected ({activity['motion_count']})",
                 cooldown_key="motion",
                 now=current_time,
+                frame=frame,
             )
 
         if self.loiter.isChecked() and activity.get("loiter_count", 0) > 0:
@@ -592,6 +622,7 @@ class LivePage(QWidget):
                 message=f"Loitering detected ({activity['loiter_count']})",
                 cooldown_key="loiter",
                 now=current_time,
+                frame=frame,
             )
 
         if self.emergency.isChecked() and activity.get("emergency_total", 0) > 0:
@@ -604,6 +635,7 @@ class LivePage(QWidget):
                     ),
                     cooldown_key="emergency",
                     now=current_time,
+                    frame=frame,
                 )
             if activity.get("emergency_triggered"):
                 self._log_activity(
@@ -611,11 +643,17 @@ class LivePage(QWidget):
                     message="Emergency pattern sequence completed",
                     cooldown_key="emergency",
                     now=current_time,
+                    frame=frame,
                 )
 
         for face in faces:
             if face.get("matched") and face.get("name"):
-                self.log_identity_detected(face["name"], face.get("score"))
+                self.log_identity_detected(
+                    face["name"],
+                    face.get("score"),
+                    frame=frame,
+                    role=face.get("role"),
+                )
 
         self._render_frame_to_label(frame)
 
@@ -725,10 +763,11 @@ class LivePage(QWidget):
             return "emergency"
         return None
 
-    def _push_alert_async(self, alert_type: str, message: str, confidence=None, face_name=None):
+    def _push_alert_async(self, alert_type: str, message: str, confidence=None, face_name=None, frame=None):
         session_snapshot = self.session if isinstance(self.session, dict) else auth_client.load_session()
         if not isinstance(session_snapshot, dict):
             return
+        frame_snapshot = frame.copy() if frame is not None else None
 
         def _worker():
             try:
@@ -738,6 +777,7 @@ class LivePage(QWidget):
                     message=message,
                     confidence=confidence,
                     face_name=face_name,
+                    frame_bgr=frame_snapshot,
                 )
             except Exception as exc:
                 self._log_with_cooldown(
@@ -749,7 +789,7 @@ class LivePage(QWidget):
 
         threading.Thread(target=_worker, daemon=True).start()
 
-    def _log_activity(self, event_key, message, cooldown_key=None, now=None):
+    def _log_activity(self, event_key, message, cooldown_key=None, now=None, frame=None):
         now = time.time() if now is None else now
         cooldown = self._resolve_cooldown(cooldown_key or event_key)
         did_log = self._log_with_cooldown(event_key, message, cooldown, now)
@@ -757,9 +797,10 @@ class LivePage(QWidget):
             return
         alert_type = self._alert_type_from_event_key(event_key)
         if alert_type:
-            self._push_alert_async(alert_type=alert_type, message=message)
+            snapshot = frame if self.screenshot.isChecked() else None
+            self._push_alert_async(alert_type=alert_type, message=message, frame=snapshot)
 
-    def log_identity_detected(self, user_id, confidence=None):
+    def log_identity_detected(self, user_id, confidence=None, frame=None, role="user"):
         now = time.time()
         if not self.identity_memory.should_log_identity(user_id, now):
             return
@@ -771,10 +812,12 @@ class LivePage(QWidget):
             cooldown_key="identity",
             now=now,
         )
-        self._push_alert_async(
-            alert_type="face_detected",
-            message=f"User detected: {user_id}{confidence_text}",
-            confidence=confidence,
-            face_name=user_id,
-        )
+        if str(role or "user").lower() == "blacklist":
+            self._push_alert_async(
+                alert_type="threat",
+                message=f"Blacklisted person detected: {user_id}{confidence_text}",
+                confidence=confidence,
+                face_name=user_id,
+                frame=frame if self.screenshot.isChecked() else None,
+            )
         self.identity_memory.mark_logged(user_id, now)

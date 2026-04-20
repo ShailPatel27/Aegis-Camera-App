@@ -30,10 +30,10 @@ MOTION_MIN_AREA = 1500
 MOTION_DILATE_ITERATIONS = 2
 
 # Crowd Detection
-CROWD_THRESHOLD = 3
+CROWD_THRESHOLD = 5
 
 # Loitering detection
-LOITER_DWELL_SECONDS = 8
+LOITER_DWELL_SECONDS = 60
 LOITER_MATCH_IOU = 0.35
 LOITER_TRACK_STALE_SECONDS = 2.5
 
@@ -50,13 +50,13 @@ ACTIVITY_LOG_COOLDOWNS = {
     "feed:stop": 2,
     "toggle": 1,
     "intrusion": 60,
-    "crowd": 60,
-    "vehicle": 60,
+    "crowd": 120,
+    "vehicle": 120,
     "threat": 60,
-    "motion": 30,
-    "loiter": 30,
-    "emergency": 5,
-    "identity": 60,
+    "motion": 60,
+    "loiter": 120,
+    "emergency": 120,
+    "identity": 120,
     "register:sample": 2,
     "register:save": 2,
     "register:delete": 2,
@@ -76,6 +76,7 @@ IDENTITY_EMBEDDING_HISTORY_PER_USER = 3
 
 # Face Registration / Recognition
 FACE_DB_PATH = "data/faces/registry.json"
+FACE_USERS_DIR = "data/faces/users"
 FACE_EMBED_SIZE = 96
 FACE_MIN_SIZE = 80
 FACE_DETECT_SCALE_FACTOR = 1.2
@@ -136,12 +137,12 @@ SETTINGS_FACTORY_DEFAULTS = {
     "YOLO_INFERENCE_FRAME_SKIP": 5,
     "YOLO_MIN_CONFIDENCE": 0.35,
     "CROWD_THRESHOLD": 3,
-    "LOITER_DWELL_SECONDS": 8,
+    "LOITER_DWELL_SECONDS": 60,
     "THREAT_MIN_CONFIDENCE": 0.55,
     "MOTION_THRESHOLD": 25,
     "MOTION_MIN_AREA": 1500,
     "FACE_RECOGNITION_FRAME_SKIP": 4,
     "FACE_RECOGNITION_THRESHOLD": 0.86,
     "FACE_REGISTER_SAMPLES_REQUIRED": 5,
-    "EMERGENCY_RESET_TIMEOUT_SECONDS": 8,
+    "EMERGENCY_RESET_TIMEOUT_SECONDS": 4,
 }

@@ -5,7 +5,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 from urllib.parse import urlparse, urlunparse
+from uuid import uuid4
 
+import cv2
 import requests
 from dotenv import load_dotenv
 from supabase import create_client
@@ -20,6 +22,7 @@ from config.settings import (
     DEFAULT_MOTION,
     DEFAULT_THREAT,
     DEFAULT_VEHICLE,
+    FACE_DB_PATH,
 )
 
 
@@ -123,6 +126,73 @@ class AuthClient:
     def _auth_headers(self, token: str) -> Dict[str, str]:
         return {"Authorization": f"Bearer {token}"}
 
+    @staticmethod
+    def _extract_public_url(public_result) -> Optional[str]:
+        if isinstance(public_result, str):
+            return public_result
+        if isinstance(public_result, dict):
+            if isinstance(public_result.get("publicURL"), str):
+                return public_result["publicURL"]
+            data = public_result.get("data")
+            if isinstance(data, dict):
+                if isinstance(data.get("publicUrl"), str):
+                    return data["publicUrl"]
+                if isinstance(data.get("publicURL"), str):
+                    return data["publicURL"]
+        return None
+
+    def _upload_alert_image(self, camera_id: str, frame_bgr, alert_type: str) -> Optional[str]:
+        if not self.supabase or frame_bgr is None or not camera_id:
+            return None
+
+        ok, encoded = cv2.imencode(".jpg", frame_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+        if not ok:
+            return None
+
+        object_path = f"images/{int(time.time() * 1000)}_{alert_type}_{uuid4().hex[:8]}.jpg"
+        content = encoded.tobytes()
+        storage = self.supabase.storage.from_(camera_id)
+
+        try:
+            storage.upload(
+                path=object_path,
+                file=content,
+                file_options={"content-type": "image/jpeg", "upsert": "true"},
+            )
+        except TypeError:
+            storage.upload(object_path, content)
+
+        public_result = storage.get_public_url(object_path)
+        return self._extract_public_url(public_result)
+
+    def upload_face_image(self, session: Dict, name: str, frame_bgr) -> Optional[str]:
+        if not isinstance(session, dict):
+            return None
+        camera = session.get("camera") if isinstance(session.get("camera"), dict) else {}
+        camera_id = camera.get("id")
+        if not self.supabase or not camera_id or frame_bgr is None:
+            return None
+
+        ok, encoded = cv2.imencode(".jpg", frame_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
+        if not ok:
+            return None
+
+        safe_name = "".join(c if c.isalnum() or c in ("_", "-") else "_" for c in (name or "user")).strip("_")
+        safe_name = safe_name or "user"
+        object_path = f"users/{safe_name}_{int(time.time() * 1000)}_{uuid4().hex[:8]}.jpg"
+        content = encoded.tobytes()
+        storage = self.supabase.storage.from_(camera_id)
+        try:
+            storage.upload(
+                path=object_path,
+                file=content,
+                file_options={"content-type": "image/jpeg", "upsert": "true"},
+            )
+        except TypeError:
+            storage.upload(object_path, content)
+        public_result = storage.get_public_url(object_path)
+        return self._extract_public_url(public_result)
+
     def _candidate_base_urls(self):
         urls = [self.base_url]
         try:
@@ -209,6 +279,70 @@ class AuthClient:
         camera = self._get_existing_camera(token) or {}
         self._save_session(token, user, camera)
         return {"token": token, "user": user, "camera": camera}
+
+    def sync_faces_registry(self, session: Dict) -> Dict[str, Dict]:
+        if not isinstance(session, dict):
+            return {}
+        if not self.supabase:
+            return {}
+
+        user = session.get("user") if isinstance(session.get("user"), dict) else {}
+        user_id = user.get("id")
+        camera = session.get("camera") if isinstance(session.get("camera"), dict) else {}
+        camera_id = str(camera.get("id") or "")
+        if not user_id:
+            return {}
+
+        face_rows = (
+            self.supabase.table("faces")
+            .select("id,name,embedding,role,image_url,samples")
+            .eq("user_id", user_id)
+            .execute()
+        ).data or []
+
+        profile_rows = (
+            self.supabase.table("profiles")
+            .select("profile_data_json")
+            .eq("user_id", user_id)
+            .limit(1)
+            .execute()
+        ).data or []
+        profile_json = profile_rows[0].get("profile_data_json") if profile_rows else {}
+        if not isinstance(profile_json, dict):
+            profile_json = {}
+        blacklist_targets = profile_json.get("blacklist_targets")
+        if not isinstance(blacklist_targets, dict):
+            blacklist_targets = {}
+
+        registry: Dict[str, Dict] = {}
+        for row in face_rows:
+            name = (row.get("name") or "").strip()
+            if not name:
+                continue
+            embedding = row.get("embedding")
+            if not isinstance(embedding, list) or len(embedding) == 0:
+                continue
+
+            role = str(row.get("role") or "user").lower()
+            if role == "blacklist":
+                target = blacklist_targets.get(str(row.get("id")))
+                if isinstance(target, dict):
+                    apply_all = bool(target.get("apply_to_all", True))
+                    scoped_ids = [str(cid) for cid in (target.get("camera_ids") or [])]
+                    if not apply_all and camera_id and camera_id not in scoped_ids:
+                        role = "user"
+
+            registry[name] = {
+                "centroid": self._normalize_embedding(embedding, len(embedding)),
+                "samples": int(row.get("samples") or 1),
+                "role": role,
+                "image_url": row.get("image_url"),
+            }
+
+        db_path = Path(FACE_DB_PATH)
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        db_path.write_text(json.dumps(registry, indent=2), encoding="utf-8")
+        return registry
 
     def _create_camera(self, token: str, user: Dict, camera_name: str) -> Dict:
         name = (camera_name or "").strip()
@@ -462,6 +596,7 @@ class AuthClient:
         image_url: Optional[str] = None,
         metadata: Optional[Dict] = None,
         face_name: Optional[str] = None,
+        frame_bgr=None,
     ) -> Dict:
         if not isinstance(session, dict):
             raise ValueError("Missing session")
@@ -472,12 +607,19 @@ class AuthClient:
         if not token or not camera_id:
             raise ValueError("Missing authenticated camera session")
 
+        resolved_image_url = image_url
+        if not resolved_image_url and frame_bgr is not None:
+            try:
+                resolved_image_url = self._upload_alert_image(camera_id, frame_bgr, alert_type)
+            except Exception:
+                resolved_image_url = None
+
         payload = {
             "camera_id": camera_id,
             "alert_type": alert_type,
             "message": message,
             "confidence": confidence,
-            "image_url": image_url,
+            "image_url": resolved_image_url,
             "metadata": metadata or {},
             "face_name": face_name,
         }

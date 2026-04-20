@@ -793,7 +793,7 @@ class LivePage(QWidget):
             if activity.get("emergency_triggered"):
                 self._log_activity(
                     event_key="emergency:triggered",
-                    message="Emergency pattern sequence completed",
+                    message="Emergency pattern sequence used",
                     cooldown_key="emergency",
                     now=current_time,
                     frame=frame,

@@ -66,6 +66,7 @@ class AIWorker(QThread):
         self._next_loiter_track_id = 1
         self._person_tracks = {}
         self._next_person_track_id = 1
+        self._seen_botsort_ids = set()
 
     @staticmethod
     def _iou(box_a, box_b):
@@ -194,7 +195,7 @@ class AIWorker(QThread):
                 or frame_index % YOLO_INFERENCE_FRAME_SKIP == 0
             )
             if run_yolo and should_run_yolo:
-                raw_detections = self.detector.detect(frame)
+                raw_detections, tracked_person_ids = self.detector.detect_with_botsort(frame)
                 detections = self._build_confirmed_detections(raw_detections)
                 last_detections = detections
 
@@ -208,6 +209,7 @@ class AIWorker(QThread):
                 self._confirmed_streaks = {}
                 self._loiter_tracks = {}
                 self._person_tracks = {}
+                self._seen_botsort_ids = set()
 
             run_face = FACE_RECOGNITION_ENABLED and (
                 self.toggles.get("face_recognition") is None
@@ -292,7 +294,17 @@ class AIWorker(QThread):
                 if det["class_name"] == "person"
             ]
             if run_yolo and should_run_yolo:
-                unique_person_entries = self._update_person_tracks(person_boxes, now=time.time())
+                now_ts = time.time()
+                unique_person_entries = 0
+                # Preferred source: BOT-SORT track IDs (more stable than IoU-only tracking).
+                if 'tracked_person_ids' in locals() and len(tracked_person_ids) > 0:
+                    for tid in tracked_person_ids:
+                        if tid not in self._seen_botsort_ids:
+                            self._seen_botsort_ids.add(tid)
+                            unique_person_entries += 1
+                else:
+                    # Fallback: previous IoU tracker behavior if IDs unavailable.
+                    unique_person_entries = self._update_person_tracks(person_boxes, now=now_ts)
             if self.toggles["loiter"]():
                 now = time.time()
                 loitering_boxes = self._update_loiter_tracks(person_boxes, now)

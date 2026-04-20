@@ -90,6 +90,16 @@ class LivePage(QWidget):
             "unknown_faces": 0,
         }
         self._analytics_recognized_names = set()
+        self._detection_last_counted_at = {}
+        self._detection_cooldowns = {
+            "motion": 10.0,
+            "crowd": 20.0,
+            "vehicle": 12.0,
+            "threat": 8.0,
+            "loiter": 15.0,
+            "emergency": 30.0,
+            "unknown_face": 12.0,
+        }
         self._manual_stop_override = False
         camera_from_session = None
         if isinstance(self.session, dict) and isinstance(self.session.get("camera"), dict):
@@ -816,7 +826,27 @@ class LivePage(QWidget):
             face_presence = matched_faces + unknown_faces
             new_entries = int(max(0, activity.get("unique_person_entries", 0)))
             people_detected = new_entries if new_entries > 0 else int(max(0, person_count, face_presence))
-            detection_count = int(max(0, activity.get("detection_count", 0)))
+
+            # Event-style detection counting with per-type cooldowns for demo stability.
+            detection_count = int(max(0, new_entries))
+
+            def _count_with_cooldown(key, condition):
+                if not condition:
+                    return 0
+                cooldown = float(self._detection_cooldowns.get(key, 10.0))
+                last_at = float(self._detection_last_counted_at.get(key, 0.0))
+                if (now - last_at) < cooldown:
+                    return 0
+                self._detection_last_counted_at[key] = now
+                return 1
+
+            detection_count += _count_with_cooldown("motion", int(activity.get("motion_count", 0)) > 0)
+            detection_count += _count_with_cooldown("crowd", bool(activity.get("crowd_triggered", False)))
+            detection_count += _count_with_cooldown("vehicle", int(activity.get("vehicle_count", 0)) > 0)
+            detection_count += _count_with_cooldown("threat", int(activity.get("threat_count", 0)) > 0)
+            detection_count += _count_with_cooldown("loiter", int(activity.get("loiter_count", 0)) > 0)
+            detection_count += _count_with_cooldown("emergency", bool(activity.get("emergency_triggered", False)))
+            detection_count += _count_with_cooldown("unknown_face", unknown_faces > 0)
 
             self._analytics_buffer["total_detections"] += detection_count
             # Count people as entries over time, not sustained per-second presence.
@@ -1023,14 +1053,6 @@ class LivePage(QWidget):
             message=f"User detected: {user_id}{confidence_text}",
             cooldown_key="identity",
             now=now,
-        )
-        # Face recognition alerts should include screenshot for recent face alerts UI.
-        self._push_alert_async(
-            alert_type="face_detected",
-            message=f"User detected: {user_id}{confidence_text}",
-            confidence=confidence,
-            face_name=user_id,
-            frame=frame,
         )
         if str(role or "user").lower() == "blacklist":
             self._push_alert_async(

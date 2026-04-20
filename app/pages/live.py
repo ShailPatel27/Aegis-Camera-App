@@ -26,6 +26,7 @@ class LivePage(QWidget):
     worker_changed = pyqtSignal(object)
     session_invalid = pyqtSignal(str)
     session_sync_result = pyqtSignal(object)
+    remote_state_result = pyqtSignal(object)
 
     def __init__(self, logger=None, session=None):
         super().__init__()
@@ -71,6 +72,8 @@ class LivePage(QWidget):
         self._session_invalid_emitted = False
         self._sync_in_progress = False
         self._applying_remote_state = False
+        self._remote_state_update_in_progress = False
+        self._recorder_starting = False
         self._recorder_service = ChunkRecorderService()
 
         root = QVBoxLayout()
@@ -180,6 +183,7 @@ class LivePage(QWidget):
         root.addLayout(action_bar)
 
         self.session_sync_result.connect(self._on_session_sync_result)
+        self.remote_state_result.connect(self._on_remote_state_result)
 
         self.sync_timer = QTimer(self)
         self.sync_timer.setInterval(5000)
@@ -303,11 +307,21 @@ class LivePage(QWidget):
             self._applying_remote_state = False
 
     def _start_recorder_service(self):
-        try:
-            self._recorder_service.start()
-            self._log_activity("recorder:start", "Recorder chunk upload service started.", "feed:start")
-        except Exception as exc:
-            self._log_activity("recorder:start:error", f"Recorder start failed: {exc}", "feed:start")
+        if self._recorder_starting or self._recorder_service.running:
+            return
+
+        self._recorder_starting = True
+
+        def _worker():
+            try:
+                self._recorder_service.start()
+                self._log_activity("recorder:start", "Recorder chunk upload service started.", "feed:start")
+            except Exception as exc:
+                self._log_activity("recorder:start:error", f"Recorder start failed: {exc}", "feed:start")
+            finally:
+                self._recorder_starting = False
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     def _stop_recorder_service(self):
         try:
@@ -315,6 +329,55 @@ class LivePage(QWidget):
         except Exception:
             pass
         self._log_activity("recorder:stop", "Recorder chunk upload service stopped.", "feed:stop")
+
+    def _apply_remote_state_async(self, stream_enabled: bool, paused: bool):
+        if self._remote_state_update_in_progress:
+            return
+        session = self.session if isinstance(self.session, dict) else auth_client.load_session()
+        if not isinstance(session, dict):
+            return
+
+        snapshot = {
+            "token": session.get("token"),
+            "user": dict(session.get("user", {})),
+            "camera": dict(session.get("camera", {})),
+        }
+        if not snapshot.get("token"):
+            return
+
+        self._remote_state_update_in_progress = True
+
+        def _worker():
+            try:
+                updated = auth_client.set_camera_stream_state(snapshot, bool(stream_enabled))
+                merged = {
+                    "token": snapshot["token"],
+                    "user": snapshot["user"],
+                    "camera": updated if isinstance(updated, dict) else snapshot["camera"],
+                }
+                updated = auth_client.set_camera_paused(merged, bool(paused))
+                self.remote_state_result.emit({"status": "ok", "camera": updated})
+            except PermissionError as exc:
+                self.remote_state_result.emit({"status": "invalid", "reason": str(exc)})
+            except Exception as exc:
+                self.remote_state_result.emit({"status": "error", "reason": str(exc)})
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_remote_state_result(self, payload):
+        self._remote_state_update_in_progress = False
+        if not isinstance(payload, dict):
+            return
+        status = payload.get("status")
+        if status == "ok":
+            camera = payload.get("camera")
+            if isinstance(camera, dict):
+                if not isinstance(self.session, dict):
+                    self.session = auth_client.load_session() or {}
+                self.session["camera"] = camera
+            return
+        if status == "invalid":
+            self._emit_session_invalid(payload.get("reason") or "Session expired")
 
     def _update_control_buttons(self):
         if self.feed_state == "inactive":
@@ -581,15 +644,7 @@ class LivePage(QWidget):
         self.worker_changed.emit(self.worker)
         self._log_activity("feed:start", "Feed started", "feed:start")
         if sync_remote:
-            try:
-                updated = auth_client.set_camera_stream_state(self.session, True)
-                self.session["camera"] = updated
-                updated = auth_client.set_camera_paused(self.session, False)
-                self.session["camera"] = updated
-            except PermissionError as exc:
-                self._emit_session_invalid(str(exc))
-            except Exception:
-                pass
+            self._apply_remote_state_async(True, False)
 
     def pause_worker(self, sync_remote=True):
         if self.worker is None:
@@ -604,15 +659,7 @@ class LivePage(QWidget):
         self.worker_changed.emit(None)
         self._log_activity("feed:pause", "Feed paused", "feed:pause")
         if sync_remote:
-            try:
-                updated = auth_client.set_camera_stream_state(self.session, True)
-                self.session["camera"] = updated
-                updated = auth_client.set_camera_paused(self.session, True)
-                self.session["camera"] = updated
-            except PermissionError as exc:
-                self._emit_session_invalid(str(exc))
-            except Exception:
-                pass
+            self._apply_remote_state_async(True, True)
 
     def stop_inactive(self, sync_remote=True):
         if self.worker is not None:
@@ -628,15 +675,7 @@ class LivePage(QWidget):
         self._update_control_buttons()
         self._log_activity("feed:stop", "Feed stopped (camera inactive)", "feed:stop")
         if sync_remote:
-            try:
-                updated = auth_client.set_camera_stream_state(self.session, False)
-                self.session["camera"] = updated
-                updated = auth_client.set_camera_paused(self.session, False)
-                self.session["camera"] = updated
-            except PermissionError as exc:
-                self._emit_session_invalid(str(exc))
-            except Exception:
-                pass
+            self._apply_remote_state_async(False, False)
 
     def stop_worker(self):
         # Called by window close handler.

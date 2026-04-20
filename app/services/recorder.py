@@ -6,7 +6,7 @@ import threading
 import time
 from io import BytesIO
 from pathlib import Path
-from queue import Queue
+from queue import Empty, Full, Queue
 from typing import Optional, Tuple
 
 import cv2
@@ -25,6 +25,9 @@ FPS = RECORD_FPS
 CHUNK_SECONDS = RECORD_CHUNK_SECONDS
 FRAMES_PER_CHUNK = FPS * CHUNK_SECONDS
 RETENTION_SECONDS = 5 * 60
+MAX_QUEUE_CHUNKS = 8
+MAX_UPLOAD_LAG_SECONDS = max(30, CHUNK_SECONDS * 6)
+LOCAL_CHUNK_MAX_AGE_SECONDS = max(90, CHUNK_SECONDS * 12)
 LOCAL_CHUNKS_DIR = PROJECT_ROOT / "data" / "chunks"
 SESSION_PATH = PROJECT_ROOT / "data" / "auth" / "session.json"
 
@@ -73,11 +76,38 @@ class ChunkRecorderService:
         self.current_avi_path: Optional[Path] = None
         self.current_size = (0, 0)
 
-        self.task_queue: "Queue[Tuple[Path, int, str, str]]" = Queue()
+        self.frame_queue: "Queue[Optional[object]]" = Queue(maxsize=max(FPS * 2, 20))
+        self.task_queue: "Queue[Tuple[Path, int, str, str]]" = Queue(maxsize=MAX_QUEUE_CHUNKS)
+        self.frame_worker_thread = threading.Thread(target=self._frame_writer_worker, daemon=True)
+        self.frame_worker_thread.start()
         self.worker_thread = threading.Thread(target=self._encode_and_upload_worker, daemon=True)
         self.worker_thread.start()
 
         LOCAL_CHUNKS_DIR.mkdir(parents=True, exist_ok=True)
+
+    def _safe_unlink(self, file_path: Path) -> None:
+        try:
+            file_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    def _cleanup_local_chunks(self, now_ts: Optional[int] = None, force_all: bool = False) -> None:
+        now_ts = now_ts or int(time.time())
+        for pattern in ("chunk_*.avi", "chunk_*.mp4"):
+            for path in LOCAL_CHUNKS_DIR.glob(pattern):
+                match = re.match(r"^chunk_(\d+)\.(avi|mp4)$", path.name)
+                if not match:
+                    continue
+                chunk_ts = int(match.group(1))
+                if force_all or (now_ts - chunk_ts) > LOCAL_CHUNK_MAX_AGE_SECONDS:
+                    self._safe_unlink(path)
+
+    def _drop_queued_task(self, task: Tuple[Path, int, str, str], reason: str) -> None:
+        avi_path, timestamp, _, _ = task
+        mp4_path = avi_path.with_suffix(".mp4")
+        self._safe_unlink(avi_path)
+        self._safe_unlink(mp4_path)
+        print(f"Dropped local chunk ({reason}): chunk_{timestamp}")
 
     def _get_supabase(self):
         if self.supabase is not None:
@@ -158,6 +188,7 @@ class ChunkRecorderService:
         if self.running:
             return
         self.camera_id, self.bucket_name = _load_session_context()
+        self._cleanup_local_chunks(force_all=True)
         self._ensure_bucket_and_prefix(self.bucket_name, self.prefix)
         self.running = True
         print(f"Recorder started for camera {self.camera_id} -> bucket {self.bucket_name}/{self.prefix}")
@@ -165,8 +196,8 @@ class ChunkRecorderService:
     def stop(self) -> None:
         if not self.running:
             return
-        self._finalize_current_chunk()
         self.running = False
+        self._enqueue_control(None)
         print("Recorder stopped")
 
     def add_frame(self, frame) -> None:
@@ -174,22 +205,7 @@ class ChunkRecorderService:
             return
         if frame is None:
             return
-
-        h, w = frame.shape[:2]
-        if w <= 0 or h <= 0:
-            return
-
-        size_changed = self.current_size != (w, h)
-        if self.writer is None or size_changed:
-            self._finalize_current_chunk()
-            self._start_new_chunk((w, h))
-
-        self.writer.write(frame)
-        self.frame_count += 1
-
-        if self.frame_count >= FRAMES_PER_CHUNK:
-            self._finalize_current_chunk()
-            self._start_new_chunk((w, h))
+        self._enqueue_frame(frame)
 
     def _start_new_chunk(self, size: Tuple[int, int]) -> None:
         self.current_chunk_ts = int(time.time())
@@ -213,15 +229,84 @@ class ChunkRecorderService:
 
         if self.frame_count > 0:
             print("Chunk recorded:", self.current_avi_path.as_posix())
-            self.task_queue.put((self.current_avi_path, self.current_chunk_ts, self.bucket_name, self.prefix))
-        else:
+            task = (self.current_avi_path, self.current_chunk_ts, self.bucket_name, self.prefix)
+            while self.task_queue.full():
+                try:
+                    old_task = self.task_queue.get_nowait()
+                    self._drop_queued_task(old_task, "uploader_backlog")
+                    self.task_queue.task_done()
+                except Empty:
+                    break
             try:
-                self.current_avi_path.unlink(missing_ok=True)
-            except Exception:
-                pass
+                self.task_queue.put_nowait(task)
+            except Full:
+                self._drop_queued_task(task, "queue_full")
+        else:
+            self._safe_unlink(self.current_avi_path)
 
         self.current_avi_path = None
         self.frame_count = 0
+        self._cleanup_local_chunks()
+
+    def _enqueue_control(self, marker) -> None:
+        try:
+            self.frame_queue.put_nowait(marker)
+        except Full:
+            # Ensure control markers are not dropped when queue is saturated.
+            try:
+                self.frame_queue.get_nowait()
+                self.frame_queue.task_done()
+            except Empty:
+                pass
+            try:
+                self.frame_queue.put_nowait(marker)
+            except Full:
+                pass
+
+    def _enqueue_frame(self, frame) -> None:
+        try:
+            self.frame_queue.put_nowait(frame)
+        except Full:
+            # Drop oldest frame to keep UI thread non-blocking and maintain recency.
+            try:
+                self.frame_queue.get_nowait()
+                self.frame_queue.task_done()
+            except Empty:
+                pass
+            try:
+                self.frame_queue.put_nowait(frame)
+            except Full:
+                pass
+
+    def _frame_writer_worker(self) -> None:
+        while True:
+            item = self.frame_queue.get()
+            try:
+                if item is None:
+                    self._finalize_current_chunk()
+                    continue
+
+                if not self.running or self.bucket_name is None:
+                    continue
+
+                frame = item
+                h, w = frame.shape[:2]
+                if w <= 0 or h <= 0:
+                    continue
+
+                size_changed = self.current_size != (w, h)
+                if self.writer is None or size_changed:
+                    self._finalize_current_chunk()
+                    self._start_new_chunk((w, h))
+
+                self.writer.write(frame)
+                self.frame_count += 1
+
+                if self.frame_count >= FRAMES_PER_CHUNK:
+                    self._finalize_current_chunk()
+                    self._start_new_chunk((w, h))
+            finally:
+                self.frame_queue.task_done()
 
     def _encode_and_upload_worker(self) -> None:
         while True:
@@ -229,6 +314,11 @@ class ChunkRecorderService:
             mp4_path = avi_path.with_suffix(".mp4")
             remote_path = f"{prefix}/chunk_{timestamp}.mp4"
             try:
+                age_seconds = int(time.time()) - int(timestamp)
+                if age_seconds > MAX_UPLOAD_LAG_SECONDS:
+                    print(f"Skipping stale queued chunk: chunk_{timestamp} ({age_seconds}s old)")
+                    continue
+
                 subprocess.run(
                     [
                         _resolve_ffmpeg_path(),
@@ -272,9 +362,7 @@ class ChunkRecorderService:
             except Exception as exc:
                 print("Chunk processing failed:", exc)
             finally:
-                try:
-                    avi_path.unlink(missing_ok=True)
-                    mp4_path.unlink(missing_ok=True)
-                except Exception:
-                    pass
+                self._safe_unlink(avi_path)
+                self._safe_unlink(mp4_path)
+                self._cleanup_local_chunks()
                 self.task_queue.task_done()

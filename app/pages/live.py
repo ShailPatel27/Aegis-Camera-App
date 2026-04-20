@@ -458,9 +458,13 @@ class LivePage(QWidget):
                 self.session["camera"] = updated_camera
         except PermissionError as exc:
             self._emit_session_invalid(str(exc))
-        except Exception:
-            # Keep UI responsive even if network/db sync fails.
-            pass
+        except Exception as exc:
+            # Keep UI responsive, but surface sync failures for troubleshooting.
+            self._log_activity(
+                event_key=f"toggle:{toggle_key}:sync_error",
+                message=f"Failed to sync {toggle_key} toggle: {exc}",
+                cooldown_key="toggle",
+            )
 
     def _reset_fps_metrics(self):
         self.prev_time = time.time()
@@ -695,17 +699,65 @@ class LivePage(QWidget):
 
     def _log_with_cooldown(self, event_key, message, cooldown_seconds, now):
         if not self.logger:
-            return
+            return False
         last_logged = self.event_last_logged.get(event_key, 0.0)
         if now - last_logged < cooldown_seconds:
-            return
+            return False
         self.logger.add_log(f"[{time.strftime('%H:%M:%S')}] {message}")
         self.event_last_logged[event_key] = now
+        return True
+
+    @staticmethod
+    def _alert_type_from_event_key(event_key: str):
+        if event_key.startswith("intrusion:"):
+            return "intrusion"
+        if event_key.startswith("crowd:"):
+            return "crowd"
+        if event_key.startswith("vehicle:"):
+            return "vehicle"
+        if event_key.startswith("threat:"):
+            return "threat"
+        if event_key.startswith("motion:"):
+            return "motion"
+        if event_key.startswith("loiter:"):
+            return "loiter"
+        if event_key.startswith("emergency:"):
+            return "emergency"
+        return None
+
+    def _push_alert_async(self, alert_type: str, message: str, confidence=None, face_name=None):
+        session_snapshot = self.session if isinstance(self.session, dict) else auth_client.load_session()
+        if not isinstance(session_snapshot, dict):
+            return
+
+        def _worker():
+            try:
+                auth_client.create_alert(
+                    session_snapshot,
+                    alert_type=alert_type,
+                    message=message,
+                    confidence=confidence,
+                    face_name=face_name,
+                )
+            except Exception as exc:
+                self._log_with_cooldown(
+                    event_key=f"alerts:sync_error:{alert_type}",
+                    message=f"DB alert sync failed ({alert_type}): {exc}",
+                    cooldown_seconds=self._resolve_cooldown("toggle"),
+                    now=time.time(),
+                )
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     def _log_activity(self, event_key, message, cooldown_key=None, now=None):
         now = time.time() if now is None else now
         cooldown = self._resolve_cooldown(cooldown_key or event_key)
-        self._log_with_cooldown(event_key, message, cooldown, now)
+        did_log = self._log_with_cooldown(event_key, message, cooldown, now)
+        if not did_log:
+            return
+        alert_type = self._alert_type_from_event_key(event_key)
+        if alert_type:
+            self._push_alert_async(alert_type=alert_type, message=message)
 
     def log_identity_detected(self, user_id, confidence=None):
         now = time.time()
@@ -718,5 +770,11 @@ class LivePage(QWidget):
             message=f"User detected: {user_id}{confidence_text}",
             cooldown_key="identity",
             now=now,
+        )
+        self._push_alert_async(
+            alert_type="face_detected",
+            message=f"User detected: {user_id}{confidence_text}",
+            confidence=confidence,
+            face_name=user_id,
         )
         self.identity_memory.mark_logged(user_id, now)

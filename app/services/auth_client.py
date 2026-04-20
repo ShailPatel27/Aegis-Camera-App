@@ -4,6 +4,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Optional, Tuple
+from urllib.parse import urlparse, urlunparse
 
 import requests
 from dotenv import load_dotenv
@@ -103,13 +104,61 @@ class AuthClient:
             raise ValueError(payload.get("message") or payload.get("detail") or "Invalid auth response")
         return token, user
 
+    @staticmethod
+    def _normalize_embedding(values, target_dim: int = 9216):
+        if not isinstance(values, (list, tuple)):
+            return [0.0] * target_dim
+        casted = []
+        for v in values:
+            try:
+                casted.append(float(v))
+            except Exception:
+                casted.append(0.0)
+        if len(casted) < target_dim:
+            casted.extend([0.0] * (target_dim - len(casted)))
+        if len(casted) > target_dim:
+            casted = casted[:target_dim]
+        return casted
+
     def _auth_headers(self, token: str) -> Dict[str, str]:
         return {"Authorization": f"Bearer {token}"}
 
+    def _candidate_base_urls(self):
+        urls = [self.base_url]
+        try:
+            parsed = urlparse(self.base_url)
+            if parsed.port == 8000:
+                alt = parsed._replace(netloc=f"{parsed.hostname}:8001")
+                urls.append(urlunparse(alt))
+        except Exception:
+            pass
+        # Keep order and uniqueness.
+        out = []
+        seen = set()
+        for u in urls:
+            if u not in seen:
+                seen.add(u)
+                out.append(u)
+        return out
+
+    def _request_with_port_fallback(self, method: str, path: str, **kwargs):
+        last_exc = None
+        for base in self._candidate_base_urls():
+            url = f"{base}{path}"
+            try:
+                return requests.request(method, url, **kwargs)
+            except requests.RequestException as exc:
+                last_exc = exc
+                continue
+        if last_exc is not None:
+            raise last_exc
+        raise ValueError("Request failed")
+
     def _get_existing_camera(self, token: str) -> Optional[Dict]:
         for attempt in range(2):
-            get_resp = requests.get(
-                f"{self.base_url}/api/cameras",
+            get_resp = self._request_with_port_fallback(
+                "GET",
+                "/api/cameras",
                 headers=self._auth_headers(token),
                 timeout=20,
             )
@@ -134,8 +183,9 @@ class AuthClient:
         return None
 
     def get_current_user(self, token: str) -> Dict:
-        response = requests.get(
-            f"{self.api_base}/me",
+        response = self._request_with_port_fallback(
+            "GET",
+            "/api/v1/auth/me",
             headers=self._auth_headers(token),
             timeout=20,
         )
@@ -165,8 +215,9 @@ class AuthClient:
         if not name:
             raise ValueError("Camera name cannot be empty.")
 
-        register_resp = requests.post(
-            f"{self.base_url}/api/cameras/register",
+        register_resp = self._request_with_port_fallback(
+            "POST",
+            "/api/cameras/register",
             headers={**self._auth_headers(token), "Content-Type": "application/json"},
             json={
                 "name": name,
@@ -249,22 +300,43 @@ class AuthClient:
         camera["config"] = config
 
         camera_id = camera.get("id")
-        user_id = user.get("id")
         updated_camera = None
-        if self.supabase and camera_id and user_id:
+
+        # Primary write path: backend API, so monitor and camera stay in sync.
+        response = self._request_with_port_fallback(
+            "PATCH",
+            f"/api/cameras/{camera_id}/config",
+            headers={**self._auth_headers(token), "Content-Type": "application/json"},
+            json={"config": config},
+            timeout=20,
+        )
+        if response.status_code in (401, 403):
+            raise PermissionError("Session expired")
+        if response.ok:
+            payload = response.json()
+            candidate = payload.get("camera") if isinstance(payload, dict) else None
+            if isinstance(candidate, dict):
+                updated_camera = candidate
+        elif self.supabase and camera_id and user.get("id"):
+            # Fallback for transient backend issues.
+            user_id = user.get("id")
             payload = {
                 "config": config,
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             }
-            response = (
+            supa_response = (
                 self.supabase.table("cameras")
                 .update(payload)
                 .eq("id", camera_id)
                 .eq("user_id", user_id)
                 .execute()
             )
-            if isinstance(response.data, list) and response.data:
-                updated_camera = response.data[0]
+            if isinstance(supa_response.data, list) and supa_response.data:
+                updated_camera = supa_response.data[0]
+            else:
+                raise ValueError("Failed to update AI toggles")
+        else:
+            raise ValueError("Failed to update AI toggles")
 
         if isinstance(updated_camera, dict):
             camera = self._merge_camera_with_defaults(updated_camera)
@@ -283,8 +355,9 @@ class AuthClient:
         if not token or not camera_id:
             raise ValueError("Missing authenticated camera session")
 
-        response = requests.patch(
-            f"{self.base_url}/api/cameras/{camera_id}/stream",
+        response = self._request_with_port_fallback(
+            "PATCH",
+            f"/api/cameras/{camera_id}/stream",
             headers={**self._auth_headers(token), "Content-Type": "application/json"},
             json={"enabled": bool(enabled)},
             timeout=20,
@@ -320,8 +393,9 @@ class AuthClient:
         config = dict(current_config)
         config["feed_paused"] = bool(paused)
 
-        response = requests.patch(
-            f"{self.base_url}/api/cameras/{camera_id}/config",
+        response = self._request_with_port_fallback(
+            "PATCH",
+            f"/api/cameras/{camera_id}/config",
             headers={**self._auth_headers(token), "Content-Type": "application/json"},
             json={"config": config},
             timeout=20,
@@ -343,8 +417,9 @@ class AuthClient:
         return camera
 
     def register(self, name: str, email: str, password: str) -> Dict:
-        response = requests.post(
-            f"{self.api_base}/register",
+        response = self._request_with_port_fallback(
+            "POST",
+            "/api/v1/auth/register",
             json={"name": name, "email": email, "password": password},
             timeout=20,
         )
@@ -358,8 +433,9 @@ class AuthClient:
         return {"token": token, "user": user, "camera": None, "needs_camera_name": True}
 
     def login(self, email: str, password: str) -> Dict:
-        response = requests.post(
-            f"{self.api_base}/login",
+        response = self._request_with_port_fallback(
+            "POST",
+            "/api/v1/auth/login",
             json={"email": email, "password": password},
             timeout=20,
         )
@@ -376,6 +452,101 @@ class AuthClient:
         existing = self._get_existing_camera(token)
         camera = existing or self._create_camera(token, user, camera_name)
         return self._finalize_session(token, user, camera)
+
+    def create_alert(
+        self,
+        session: Dict,
+        alert_type: str,
+        message: str,
+        confidence: Optional[float] = None,
+        image_url: Optional[str] = None,
+        metadata: Optional[Dict] = None,
+        face_name: Optional[str] = None,
+    ) -> Dict:
+        if not isinstance(session, dict):
+            raise ValueError("Missing session")
+
+        token = session.get("token")
+        camera = session.get("camera") if isinstance(session.get("camera"), dict) else {}
+        camera_id = camera.get("id")
+        if not token or not camera_id:
+            raise ValueError("Missing authenticated camera session")
+
+        payload = {
+            "camera_id": camera_id,
+            "alert_type": alert_type,
+            "message": message,
+            "confidence": confidence,
+            "image_url": image_url,
+            "metadata": metadata or {},
+            "face_name": face_name,
+        }
+        response = self._request_with_port_fallback(
+            "POST",
+            "/api/v1/monitor/alerts",
+            headers={**self._auth_headers(token), "Content-Type": "application/json"},
+            json=payload,
+            timeout=20,
+        )
+        if response.status_code in (401, 403):
+            raise PermissionError("Session expired")
+        if not response.ok:
+            detail = None
+            try:
+                err = response.json()
+                detail = err.get("detail") or err.get("message")
+            except Exception:
+                detail = response.text.strip() or None
+            raise ValueError(detail or f"Failed to create alert (HTTP {response.status_code})")
+        return response.json()
+
+    def sync_face_profile(self, session: Dict, name: str, embedding, role: str = "user", image_url: Optional[str] = None) -> Dict:
+        if not isinstance(session, dict):
+            raise ValueError("Missing session")
+        user = session.get("user") if isinstance(session.get("user"), dict) else {}
+        user_id = user.get("id")
+        if not user_id:
+            raise ValueError("Missing user id")
+
+        clean_name = (name or "").strip()
+        if not clean_name:
+            raise ValueError("Face name is required")
+
+        if embedding is None:
+            raise ValueError("Missing face embedding")
+        normalized_embedding = self._normalize_embedding(embedding, 9216)
+
+        if not self.supabase:
+            raise ValueError("Supabase client unavailable for face sync")
+
+        existing = (
+            self.supabase.table("faces")
+            .select("id")
+            .eq("user_id", user_id)
+            .eq("name", clean_name)
+            .limit(1)
+            .execute()
+        )
+        existing_rows = existing.data if isinstance(existing.data, list) else []
+
+        payload = {
+            "user_id": user_id,
+            "name": clean_name,
+            "role": role or "user",
+            "embedding": normalized_embedding,
+            "image_url": image_url,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+        if existing_rows:
+            face_id = existing_rows[0].get("id")
+            response = self.supabase.table("faces").update(payload).eq("id", face_id).execute()
+        else:
+            payload["created_at"] = datetime.now(timezone.utc).isoformat()
+            response = self.supabase.table("faces").insert(payload).execute()
+
+        rows = response.data if isinstance(response.data, list) else []
+        return rows[0] if rows else {}
 
 
 auth_client = AuthClient()

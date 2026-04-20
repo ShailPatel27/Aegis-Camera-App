@@ -1,7 +1,7 @@
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QWidget, QVBoxLayout, QListWidget
 from pathlib import Path
-from config.settings import LOCAL_LOG_FILE_PATH, LOCAL_LOG_UI_MAX_ITEMS
+from config.settings import LOCAL_LOG_FILE_PATH, LOCAL_LOG_UI_MAX_ITEMS, LOCAL_LOG_FILE_MAX_LINES
 
 class LogsPage(QWidget):
     def __init__(self):
@@ -23,3 +23,13 @@ class LogsPage(QWidget):
         log_path.parent.mkdir(parents=True, exist_ok=True)
         with log_path.open("a", encoding="utf-8") as fp:
             fp.write(message + "\n")
+
+        # Keep file bounded to prevent unbounded growth.
+        if LOCAL_LOG_FILE_MAX_LINES > 0:
+            try:
+                lines = log_path.read_text(encoding="utf-8").splitlines()
+                if len(lines) > LOCAL_LOG_FILE_MAX_LINES:
+                    lines = lines[-LOCAL_LOG_FILE_MAX_LINES:]
+                    log_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            except Exception:
+                pass

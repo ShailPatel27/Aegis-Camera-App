@@ -23,6 +23,7 @@ from config.settings import (
     FACE_RECOGNITION_UNKNOWN_LABEL,
 )
 from core.face_engine import FaceEngine
+from app.services.auth_client import auth_client
 
 
 class RegisterPage(QWidget):
@@ -337,11 +338,24 @@ class RegisterPage(QWidget):
             self.set_status(str(exc))
             return
 
+        # Sync to shared monitor DB so face entries appear in web monitor too.
+        sync_note = ""
+        try:
+            session = auth_client.load_session()
+            centroid = None
+            if saved_name in self.face_engine.registry:
+                centroid = self.face_engine.registry[saved_name].get("centroid")
+            if session and centroid is not None:
+                auth_client.sync_face_profile(session, saved_name, centroid)
+                sync_note = " | synced to monitor"
+        except Exception as exc:
+            sync_note = f" | sync failed: {exc}"
+
         self.pending_embeddings = []
         self.samples_label.setText(self._sample_text())
         self.name_input.setText("")
         self.refresh_users()
-        self.set_status(f"User saved: {saved_name}")
+        self.set_status(f"User saved: {saved_name}{sync_note}")
         self._log_activity(f"register:save:{saved_name}", f"User registered: {saved_name}", "register:save")
 
     def delete_selected_user(self):

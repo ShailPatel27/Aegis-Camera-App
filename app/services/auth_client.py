@@ -31,7 +31,7 @@ load_dotenv()
 
 class AuthClient:
     def __init__(self):
-        self.base_url = os.getenv("MONITOR_BACKEND_URL", "http://localhost:8000").rstrip("/")
+        self.base_url = os.getenv("MONITOR_BACKEND_URL", "https://api.aegis.lenex.dev").rstrip("/")
         self.api_base = f"{self.base_url}/api/v1/auth"
         self.session_path = Path("data/auth/session.json")
         self.supabase = None
@@ -194,22 +194,7 @@ class AuthClient:
         return self._extract_public_url(public_result)
 
     def _candidate_base_urls(self):
-        urls = [self.base_url]
-        try:
-            parsed = urlparse(self.base_url)
-            if parsed.port == 8000:
-                alt = parsed._replace(netloc=f"{parsed.hostname}:8001")
-                urls.append(urlunparse(alt))
-        except Exception:
-            pass
-        # Keep order and uniqueness.
-        out = []
-        seen = set()
-        for u in urls:
-            if u not in seen:
-                seen.add(u)
-                out.append(u)
-        return out
+        return [self.base_url]
 
     def _request_with_port_fallback(self, method: str, path: str, **kwargs):
         last_exc = None

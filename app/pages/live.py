@@ -298,10 +298,12 @@ class LivePage(QWidget):
         self._stop_recorder_service()
         self._reset_fps_metrics()
 
-        self.worker = AIWorker(self._toggle_map(), camera_index=self.selected_camera_index)
-        self.worker.raw_frame_ready.connect(self._on_raw_frame_ready)
-        self.worker.frame_ready.connect(self.update_ui)
-        self.worker.start()
+        try:
+            self._start_worker_instance()
+        except Exception as exc:
+            self._handle_worker_start_error(exc)
+            return
+
         self._start_recorder_service()
         self.status.setText("AI: ACTIVE")
         self.worker_changed.emit(self.worker)
@@ -665,7 +667,7 @@ class LivePage(QWidget):
                 )
             )
 
-    def _inactive_frame(self):
+    def _inactive_frame(self, title="CAMERA INACTIVE", subtitle="Press Start Feed to reactivate camera"):
         frame = np.zeros((720, 1280, 3), dtype=np.uint8)
         white = (240, 240, 240)
         cx, cy = 640, 320
@@ -674,7 +676,7 @@ class LivePage(QWidget):
         cv2.circle(frame, (cx, cy), 38, white, 6)
         cv2.putText(
             frame,
-            "CAMERA INACTIVE",
+            title,
             (470, 520),
             cv2.FONT_HERSHEY_SIMPLEX,
             1.1,
@@ -684,7 +686,7 @@ class LivePage(QWidget):
         )
         cv2.putText(
             frame,
-            "Press Start Feed to reactivate camera",
+            subtitle,
             (430, 570),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.75,
@@ -693,6 +695,31 @@ class LivePage(QWidget):
             cv2.LINE_AA,
         )
         return frame
+
+    def _start_worker_instance(self):
+        worker = AIWorker(self._toggle_map(), camera_index=self.selected_camera_index)
+        worker.raw_frame_ready.connect(self._on_raw_frame_ready)
+        worker.frame_ready.connect(self.update_ui)
+        worker.start()
+        self.worker = worker
+
+    def _handle_worker_start_error(self, exc):
+        self.worker = None
+        self.feed_state = "inactive"
+        self.people_label.setText("People: 0")
+        self.status.setText("AI: UNAVAILABLE")
+        self._reset_fps_metrics()
+        self._render_frame_to_label(
+            self._inactive_frame(
+                title="FEED UNAVAILABLE",
+                subtitle="Check camera/model setup, then press Start Feed",
+            )
+        )
+        self._update_control_buttons()
+        message = f"Feed failed to start: {exc}"
+        if self.logger:
+            self.logger.add_log(f"[{time.strftime('%H:%M:%S')}] {message}")
+        self.worker_changed.emit(None)
 
     def update_frame(self):
         pass
@@ -912,12 +939,14 @@ class LivePage(QWidget):
         if self.worker is not None:
             return
         self._refresh_toggles_from_db()
-        self.feed_state = "active"
         self._reset_fps_metrics()
-        self.worker = AIWorker(self._toggle_map(), camera_index=self.selected_camera_index)
-        self.worker.raw_frame_ready.connect(self._on_raw_frame_ready)
-        self.worker.frame_ready.connect(self.update_ui)
-        self.worker.start()
+        try:
+            self._start_worker_instance()
+        except Exception as exc:
+            self._handle_worker_start_error(exc)
+            return
+
+        self.feed_state = "active"
         self._start_recorder_service()
         self.status.setText("AI: ACTIVE")
         self._update_control_buttons()

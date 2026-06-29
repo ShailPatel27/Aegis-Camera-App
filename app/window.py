@@ -1,4 +1,4 @@
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtWidgets import (
     QLabel,
     QMainWindow,
@@ -54,8 +54,6 @@ class MainWindow(QMainWindow):
         user["camera"] = session.get("camera", {})
 
         main_widget = QWidget()
-        self.setCentralWidget(main_widget)
-
         main_layout = QVBoxLayout()
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
@@ -95,37 +93,65 @@ class MainWindow(QMainWindow):
             """
         )
 
-        self.stack = QStackedWidget()
+        stack = QStackedWidget()
+        logs_page = None
+        live_page = None
+        register_page = None
+        emergency_page = None
+        settings_page = None
+        account_page = None
+        try:
+            logs_page = LogsPage()
+            live_page = LivePage(logs_page, session=session)
+            register_page = RegisterPage(logs_page)
+            emergency_page = EmergencyPage(logs_page)
+            settings_page = SettingsPage()
+            account_page = AccountPage(user)
 
-        self.logs_page = LogsPage()
-        self.live_page = LivePage(self.logs_page, session=session)
-        self.register_page = RegisterPage(self.logs_page)
-        self.emergency_page = EmergencyPage(self.logs_page)
-        self.settings_page = SettingsPage()
-        self.account_page = AccountPage(user)
+            stack.addWidget(live_page)
+            stack.addWidget(logs_page)
+            stack.addWidget(register_page)
+            stack.addWidget(emergency_page)
+            stack.addWidget(settings_page)
+            stack.addWidget(account_page)
 
-        self.stack.addWidget(self.live_page)
-        self.stack.addWidget(self.logs_page)
-        self.stack.addWidget(self.register_page)
-        self.stack.addWidget(self.emergency_page)
-        self.stack.addWidget(self.settings_page)
-        self.stack.addWidget(self.account_page)
+            live_page.worker_changed.connect(register_page.set_live_worker)
+            live_page.worker_changed.connect(emergency_page.set_live_worker)
+            live_page.session_invalid.connect(self._handle_session_invalid)
+            register_page.set_live_worker(live_page.worker)
+            emergency_page.set_live_worker(live_page.worker)
+            account_page.logout_requested.connect(self._logout)
 
-        self.live_page.worker_changed.connect(self.register_page.set_live_worker)
-        self.live_page.worker_changed.connect(self.emergency_page.set_live_worker)
-        self.live_page.session_invalid.connect(self._handle_session_invalid)
-        self.register_page.set_live_worker(self.live_page.worker)
-        self.emergency_page.set_live_worker(self.live_page.worker)
-        self.account_page.logout_requested.connect(self._logout)
+            self.sidebar.currentRowChanged.connect(self.on_nav_changed)
+            self.sidebar.setCurrentRow(0)
 
-        self.sidebar.currentRowChanged.connect(self.on_nav_changed)
-        self.sidebar.setCurrentRow(0)
+            content.addWidget(self.sidebar)
+            content.addWidget(stack)
+        except Exception:
+            if live_page is not None:
+                live_page.stop_worker()
+            raise
 
-        content.addWidget(self.sidebar)
-        content.addWidget(self.stack)
+        self.logs_page = logs_page
+        self.live_page = live_page
+        self.register_page = register_page
+        self.emergency_page = emergency_page
+        self.settings_page = settings_page
+        self.account_page = account_page
+        self.stack = stack
+        self.setCentralWidget(main_widget)
 
     def _on_auth_success(self, session):
-        self._show_app(session)
+        QTimer.singleShot(0, lambda: self._finish_auth_success(session))
+
+    def _finish_auth_success(self, session):
+        try:
+            self._show_app(session)
+        except Exception as exc:
+            if self.auth_page is not None:
+                self.auth_page._set_status(f"Login succeeded, but the app failed to open: {exc}")
+            else:
+                raise
 
     def _logout(self):
         auth_client.clear_session()

@@ -21,6 +21,7 @@ class EmergencyPage(QWidget):
         self.live_worker = None
         self.detector = HandPatternDetector()
         self.store = EmergencyPatternStore()
+        self.detector_error = self.detector.init_error
 
         self.current_pattern = None
         self.captured_steps = []
@@ -104,7 +105,10 @@ class EmergencyPage(QWidget):
         self.saved_seq_label.setStyleSheet("color: #94a3b8;")
         root.addWidget(self.saved_seq_label)
 
-        self.status_label = QLabel("Waiting for hand input.")
+        status_text = "Waiting for hand input."
+        if not self.detector.is_available():
+            status_text = "Emergency hand detection is unavailable."
+        self.status_label = QLabel(status_text)
         self.status_label.setStyleSheet("color: #94a3b8;")
         root.addWidget(self.status_label)
 
@@ -164,7 +168,10 @@ class EmergencyPage(QWidget):
         self.live_worker = worker
         if self.live_worker is not None:
             self.live_worker.raw_frame_ready.connect(self.on_live_frame)
-            self.status_label.setText("Live feed connected. Show hand and press Confirm.")
+            if self.detector.is_available():
+                self.status_label.setText("Live feed connected. Show hand and press Confirm.")
+            else:
+                self.status_label.setText("Emergency hand detection is unavailable.")
         else:
             self.status_label.setText("Feed stopped. Start feed from Live page.")
             self.current_pattern = None
@@ -172,7 +179,16 @@ class EmergencyPage(QWidget):
 
     def on_live_frame(self, frame):
         display = frame.copy()
+        if not self.detector.is_available():
+            self.current_pattern = None
+            self._refresh_labels()
+            self.status_label.setText("Emergency hand detection is unavailable.")
+            self._render_preview(display)
+            return
+
         self.current_pattern = self.detector.detect(display, draw=True)
+        if not self.detector.is_available():
+            self.status_label.setText("Emergency hand detection is unavailable.")
         self._refresh_labels()
 
         cv2.putText(
@@ -196,6 +212,9 @@ class EmergencyPage(QWidget):
             cv2.LINE_AA,
         )
 
+        self._render_preview(display)
+
+    def _render_preview(self, display):
         rgb = cv2.cvtColor(display, cv2.COLOR_BGR2RGB)
         h, w, c = rgb.shape
         img = QImage(rgb.data, w, h, c * w, QImage.Format_RGB888)

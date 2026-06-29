@@ -46,7 +46,8 @@ class AIWorker(QThread):
         self.detector = Detector()
         self.motion = MotionDetector()
         self.face_engine = FaceEngine()
-        self.hand_detector = HandPatternDetector()
+        self.hand_detector = None
+        self._hand_detector_error_logged = False
         self.emergency_store = EmergencyPatternStore()
         self.emergency_matcher = EmergencySequenceMatcher(self.emergency_store.load_steps())
         self._last_emergency_status = {
@@ -357,9 +358,12 @@ class AIWorker(QThread):
                 status = self.emergency_matcher.update(None, now=now)
                 if EMERGENCY_FRAME_SKIP <= 1 or frame_index % EMERGENCY_FRAME_SKIP == 0:
                     # Keep emergency hand landmarks exclusive to Emergency tab preview.
-                    hand_pattern = self.hand_detector.detect(frame, draw=False)
-                    now = time.time()
-                    status = self.emergency_matcher.update(hand_pattern, now=now)
+                    if self.hand_detector is None:
+                        self.hand_detector = HandPatternDetector()
+                    if self.hand_detector.is_available():
+                        hand_pattern = self.hand_detector.detect(frame, draw=False)
+                        now = time.time()
+                        status = self.emergency_matcher.update(hand_pattern, now=now)
 
                 self._last_emergency_status = status
                 emergency_progress = status["progress"]

@@ -125,18 +125,31 @@ class HandPatternDetector:
     )
 
     def __init__(self):
-        base_options = mp_python.BaseOptions(
-            model_asset_path=EMERGENCY_HAND_LANDMARKER_MODEL_PATH
-        )
-        options = vision.HandLandmarkerOptions(
-            base_options=base_options,
-            running_mode=vision.RunningMode.IMAGE,
-            num_hands=EMERGENCY_HAND_MAX_NUM,
-            min_hand_detection_confidence=EMERGENCY_MIN_DETECTION_CONFIDENCE,
-            min_hand_presence_confidence=EMERGENCY_MIN_PRESENCE_CONFIDENCE,
-            min_tracking_confidence=EMERGENCY_MIN_TRACKING_CONFIDENCE,
-        )
-        self.landmarker = vision.HandLandmarker.create_from_options(options)
+        self.landmarker = None
+        self.init_error = None
+        model_path = Path(EMERGENCY_HAND_LANDMARKER_MODEL_PATH)
+        if not model_path.exists():
+            self.init_error = f"Hand landmark model not found: {model_path}"
+            return
+
+        try:
+            base_options = mp_python.BaseOptions(
+                model_asset_path=str(model_path)
+            )
+            options = vision.HandLandmarkerOptions(
+                base_options=base_options,
+                running_mode=vision.RunningMode.IMAGE,
+                num_hands=EMERGENCY_HAND_MAX_NUM,
+                min_hand_detection_confidence=EMERGENCY_MIN_DETECTION_CONFIDENCE,
+                min_hand_presence_confidence=EMERGENCY_MIN_PRESENCE_CONFIDENCE,
+                min_tracking_confidence=EMERGENCY_MIN_TRACKING_CONFIDENCE,
+            )
+            self.landmarker = vision.HandLandmarker.create_from_options(options)
+        except Exception as exc:
+            self.init_error = str(exc) or exc.__class__.__name__
+
+    def is_available(self):
+        return self.landmarker is not None
 
     def _finger_pattern(self, hand_landmarks, handedness_label):
         lm = hand_landmarks
@@ -186,9 +199,17 @@ class HandPatternDetector:
             cv2.circle(frame_bgr, (x, y), 3, (255, 255, 255), -1, cv2.LINE_AA)
 
     def detect(self, frame_bgr, draw=True):
+        if self.landmarker is None:
+            return None
+
         rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-        results = self.landmarker.detect(mp_image)
+        try:
+            results = self.landmarker.detect(mp_image)
+        except Exception as exc:
+            self.init_error = str(exc) or exc.__class__.__name__
+            self.landmarker = None
+            return None
 
         if not results.hand_landmarks:
             return None

@@ -127,6 +127,34 @@ class AuthClient:
         return {"Authorization": f"Bearer {token}"}
 
     @staticmethod
+    def _safe_json(response) -> Dict:
+        try:
+            payload = response.json()
+        except ValueError:
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    @staticmethod
+    def _response_error_message(response, fallback: str) -> str:
+        payload = AuthClient._safe_json(response)
+        message = payload.get("message") or payload.get("detail") or payload.get("error")
+        if isinstance(message, str) and message.strip():
+            return message.strip()
+
+        text = (response.text or "").strip()
+        content_type = response.headers.get("Content-Type", "")
+        if text and "application/json" not in content_type.lower() and len(text) <= 160:
+            return text
+
+        if response.status_code in (401, 403):
+            return "Invalid email or password."
+        if response.status_code >= 500:
+            return "Login service is temporarily unavailable. Please try again."
+        if response.status_code:
+            return f"{fallback} (HTTP {response.status_code})"
+        return fallback
+
+    @staticmethod
     def _extract_public_url(public_result) -> Optional[str]:
         if isinstance(public_result, str):
             return public_result
@@ -599,15 +627,18 @@ class AuthClient:
         return camera
 
     def register(self, name: str, email: str, password: str) -> Dict:
-        response = self._request_with_port_fallback(
-            "POST",
-            "/api/v1/auth/register",
-            json={"name": name, "email": email, "password": password},
-            timeout=20,
-        )
-        payload = response.json()
-        if not response.ok or not payload.get("success", True):
-            raise ValueError(payload.get("message") or payload.get("detail") or "Registration failed")
+        try:
+            response = self._request_with_port_fallback(
+                "POST",
+                "/api/v1/auth/register",
+                json={"name": name, "email": email, "password": password},
+                timeout=20,
+            )
+        except requests.RequestException:
+            raise ValueError("Registration service is unavailable. Please check your connection and try again.")
+        payload = self._safe_json(response)
+        if not response.ok or not payload or not payload.get("success", True):
+            raise ValueError(self._response_error_message(response, "Registration failed"))
         token, user = self._extract_auth_payload(payload)
         camera = self._get_existing_camera(token)
         if camera:
@@ -615,15 +646,18 @@ class AuthClient:
         return {"token": token, "user": user, "camera": None, "needs_camera_name": True}
 
     def login(self, email: str, password: str) -> Dict:
-        response = self._request_with_port_fallback(
-            "POST",
-            "/api/v1/auth/login",
-            json={"email": email, "password": password},
-            timeout=20,
-        )
-        payload = response.json()
-        if not response.ok or not payload.get("success", True):
-            raise ValueError(payload.get("message") or payload.get("detail") or "Login failed")
+        try:
+            response = self._request_with_port_fallback(
+                "POST",
+                "/api/v1/auth/login",
+                json={"email": email, "password": password},
+                timeout=20,
+            )
+        except requests.RequestException:
+            raise ValueError("Login service is unavailable. Please check your connection and try again.")
+        payload = self._safe_json(response)
+        if not response.ok or not payload or not payload.get("success", True):
+            raise ValueError(self._response_error_message(response, "Login failed"))
         token, user = self._extract_auth_payload(payload)
         camera = self._get_existing_camera(token)
         if camera:
